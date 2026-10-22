@@ -6,14 +6,14 @@ Pick one. Run **only one instance per Pixoo**: two would fight over the screen.
 |---|---|
 | [Docker Compose](#docker-compose) | Most people: any machine with Docker (NAS, mini PC, Pi). |
 | [docker run](#docker-run) | One-liners and testing. |
-| [Docker Swarm](#docker-swarm) | Existing Swarm clusters, optionally behind Traefik. |
+| [Docker Swarm](#docker-swarm) | Existing Swarm clusters. |
 | [Portainer](#portainer) | If you manage containers through Portainer's UI. |
 | [install.sh (systemd)](#installsh-systemd-bare-metal-raspberry-pi) | No Docker: Debian/Ubuntu, Raspberry Pi OS. |
 | [Proxmox LXC](#proxmox-lxc) | A tiny dedicated container on Proxmox. |
 | [Plain Python](#plain-python) | Development. |
 
 The image is `ghcr.io/haythamelkhoja/pixoo-radar-enhanced`, for `linux/amd64` and `linux/arm64`.
-Tags: `latest`, the exact version (`0.1.0`) and the minor series (`0.1`).
+Tags: `latest`, the exact version (`0.1.2`) and the minor series (`0.1`).
 
 Whatever you choose, the Pixoo's network must be able to reach the app on TCP 8765
 (for hosted GIFs) and the app must be able to reach the Pixoo on TCP 80. See
@@ -48,16 +48,21 @@ docker run -d --name pixoo-radar --restart unless-stopped -p 8765:8765 \
 
 ## Docker Swarm
 
-[`stack.yml`](../stack.yml) is a complete example with Traefik:
+[`stack.yml`](../stack.yml) is a complete example:
 
 - Port **8765 is published in ingress mode**, so it answers on every node. The Pixoo
-  fetches GIFs from there, bypassing Traefik (see [why](troubleshooting.md#the-pixoo-cant-follow-http--https-redirects)).
-- **Traefik labels** route `pixooradar.example.com` over HTTPS to the same port, for
-  the browser view.
+  fetches GIFs from there, and so does the browser view.
+- **No reverse proxy.** The Pixoo can't do TLS and won't follow redirects, so putting
+  a proxy in the path breaks it (see [why](troubleshooting.md#the-pixoo-cant-follow-http--https-redirects)).
+  Keeping the stack proxy-free means one less thing to get wrong.
 - `replicas: 1` with `update_config.order: stop-first`, so there's never more than one
   instance driving the Pixoo.
-- It joins an external overlay network called `public` (the one Traefik watches).
-  Rename it to match yours, or drop `networks:` and the labels if you don't use Traefik.
+- No external network is required; the stack's default overlay is enough. Add a
+  `networks:` block only if you need it to join an existing one.
+
+Swarm doesn't route a published port to a task until the task's healthcheck passes, so
+the app's own address refuses connections for the first few seconds. The app waits that
+out (`SELF_CHECK_WAIT`); see [troubleshooting](troubleshooting.md#swarm-connection-refused-on-your-own-published-port).
 
 Edit the environment values and hostnames, then:
 
@@ -66,11 +71,18 @@ docker stack deploy -c stack.yml pixooradar
 docker service logs -f pixooradar_radar
 ```
 
-Update to a new release: `docker service update --image ghcr.io/haythamelkhoja/pixoo-radar-enhanced:0.1.0 pixooradar_radar`
+Update to a new release: `docker service update --image ghcr.io/haythamelkhoja/pixoo-radar-enhanced:0.1.2 pixooradar_radar`
 (or deploy the stack again with `latest` and `--resolve-image always`).
 
-`GIF_BASE_URL` can be any name resolving to a swarm node, e.g. the Traefik hostname
-itself but with `http://` and `:8765`. The app resolves it and hands the Pixoo the IP.
+`GIF_BASE_URL` can be any name resolving to a swarm node, with `http://` and `:8765`.
+The app resolves it and hands the Pixoo the IP.
+
+### Serving the browser view over HTTPS
+
+If you want the browser view on a hostname with TLS, add your proxy's labels back and
+point them at port 8765 — but leave `GIF_BASE_URL` on the node's own `:8765`. The proxy
+then serves people; the Pixoo keeps going straight to the port. Pointing `GIF_BASE_URL`
+at the proxy is the single most common way to end up back on "Loading..".
 
 ## Portainer
 

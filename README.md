@@ -97,10 +97,11 @@ docker run -d --name pixoo-radar --restart unless-stopped -p 8765:8765 \
 
 [`compose.yaml`](compose.yaml) + [`.env.example`](.env.example), see Quick start.
 
-### Docker Swarm (with Traefik)
+### Docker Swarm
 
-[`stack.yml`](stack.yml) publishes port 8765 for the Pixoo and routes a hostname through
-Traefik (HTTPS) for the browser view:
+[`stack.yml`](stack.yml) publishes port 8765 in ingress mode, so it answers on every
+node — that's where the Pixoo fetches its GIFs and where the browser view lives. No
+reverse proxy, on purpose: the Pixoo can't do TLS or follow redirects.
 
 ```sh
 docker stack deploy -c stack.yml pixooradar

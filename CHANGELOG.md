@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-10-22
+
+### Changed
+- `stack.yml` no longer ships Traefik labels or an external `public` network. The Pixoo
+  has to bypass a reverse proxy anyway (no TLS, no redirects), so the stack now just
+  publishes port 8765 in ingress mode and serves both the GIFs and the browser view
+  from there. Nothing external has to exist before deploying.
+- Docs: the Swarm section covers putting a proxy in front of the browser view only,
+  while leaving `GIF_BASE_URL` on the node's own port.
+
 ## [0.1.1] - 2026-10-22
 
 ### Fixed
@@ -49,6 +59,7 @@ First public release, extracted from a single-file Docker Swarm stack.
 ### Fixed
 - Climb/descent arrows (▲/▼) after the altitude, which had been lost from the font.
 
-[Unreleased]: https://github.com/haythamelkhoja/pixoo-radar-enhanced/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/haythamelkhoja/pixoo-radar-enhanced/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/haythamelkhoja/pixoo-radar-enhanced/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/haythamelkhoja/pixoo-radar-enhanced/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/haythamelkhoja/pixoo-radar-enhanced/releases/tag/v0.1.0
