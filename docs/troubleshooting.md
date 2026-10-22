@@ -30,7 +30,8 @@ Look for one of these in the logs:
 | `GIF_BASE_URL not set: pushing frames` | Not configured. | Set `GIF_BASE_URL`. |
 | `... redirects to https://..., which the Pixoo can't follow` | You pointed it at a reverse proxy. | [Use the app's own port](#the-pixoo-cant-follow-http--https-redirects). |
 | `... answered HTTP 404 but not from this app (proxy routing?)` | Something else answers on that address. | Check host, port and port mapping. |
-| `The Pixoo didn't fetch ...` | The app is fine but the Pixoo can't reach it. | [DNS / firewall](#firewall-the-pixoos-network-must-reach-port-8765). Restart the app after fixing; it stays in push mode until then. |
+| `The Pixoo didn't fetch ...` | The app is fine but the Pixoo can't reach it. | [DNS / firewall](#firewall-the-pixoos-network-must-reach-port-8765). The app re-tests the URL every `HOSTED_RETRY_SECONDS` (30 min) and returns to hosted GIFs on its own; restart to pick it up at once. |
+| `... isn't answering yet ...; waiting up to 120s` | Normal on Swarm: the published port isn't routed until the healthcheck passes. | Nothing, unless it never comes up — see [Swarm](#swarm-connection-refused-on-your-own-published-port). |
 
 ## The Pixoo can't follow http → https redirects
 
@@ -57,6 +58,42 @@ You can check what the Pixoo would get from any machine on its network:
 ```sh
 curl -sI http://192.168.1.20:8765/latest.gif   # want: HTTP/1.0 200 OK, image/gif. Not 301/302/308.
 ```
+
+## Swarm: "Connection refused" on your own published port
+
+```text
+WARNING Couldn't test http://192.168.1.20:8765/abc123/check from inside the container
+        (... [Errno 111] Connection refused ...); trying it with the Pixoo anyway
+WARNING The Pixoo didn't fetch http://192.168.1.20:8765/abc123/1.gif ...
+```
+
+Both within the first 20 seconds of start-up, on an address you know is correct.
+
+Docker Swarm **does not add a task to the ingress routing mesh until its healthcheck
+passes**. The image has a `HEALTHCHECK`, so for the first several seconds the published
+port refuses connections on every node, including from inside the app's own container.
+A self-check at that moment sees a dead address even though nothing is wrong.
+
+The app waits for this: it retries the self-check for `SELF_CHECK_WAIT` seconds (120 by
+default) and only then falls back. A healthy start on Swarm looks like:
+
+```text
+INFO http://192.168.1.20:8765/abc123/check isn't answering yet (...); waiting up to 120s
+INFO http://192.168.1.20:8765/abc123/check came up after the wait
+INFO http://192.168.1.20:8765 reaches this app over plain http
+```
+
+If it still fails after the wait, the port genuinely isn't being published. Check:
+
+```sh
+docker service ps --no-trunc <stack>_<service>    # task running, not pending or restarting
+docker service inspect -f '{{json .Endpoint.Ports}}' <stack>_<service>
+docker node ls -q | xargs -I{} docker node inspect -f '{{.Description.Hostname}} {{.Status.Addr}}' {}
+curl -sS -o /dev/null -w '%{http_code}\n' http://<node-ip>:8765/     # want 200
+```
+
+A common cause is another service already holding ingress port 8765, which leaves the
+new task unable to publish. `docker service ls` shows who has it.
 
 ## Firewall: the Pixoo's network must reach port 8765
 

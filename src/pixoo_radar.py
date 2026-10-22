@@ -101,6 +101,9 @@ COLOR_WHITE = "#FFFFFF"
 
 HTTP_TIMEOUT = (5, 20)        # connect, read (seconds)
 GIF_RESET_EVERY = 32          # fresh animation-id counter every N uploads (Pixoo freezes otherwise)
+SELF_CHECK_WAIT = _setting("SELF_CHECK_WAIT", 120)   # how long our own address may take to start
+SELF_CHECK_INTERVAL = 5                              # answering (Swarm routes to healthy tasks only)
+HOSTED_RETRY_SECONDS = _setting("HOSTED_RETRY_SECONDS", 1800)  # re-try hosted GIFs this often
 AVCODES_URL = "https://raw.githubusercontent.com/Jxck-S/airline-logos/main/avcodes_banners/{icao}.png"
 
 log = logging.getLogger("pixoo_radar")
@@ -326,14 +329,31 @@ class GifHost:
         self.server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
-    def self_check(self):
-        """Fetch our own address the way the Pixoo will. False only if it's definitely broken."""
+    def self_check(self, wait_seconds=SELF_CHECK_WAIT):
+        """Fetch our own address the way the Pixoo will. False only if it's definitely broken.
+
+        Keeps retrying a refused/unanswered connection for wait_seconds: an orchestrator
+        can take a while to route our published port to us (Docker Swarm doesn't add a
+        task to the ingress mesh until it passes its healthcheck, so our own address
+        refuses connections for the first half-minute or so)."""
         url = f"{self.base_url}/{self.token}/check"
-        try:
-            resp = requests.get(url, timeout=HTTP_TIMEOUT, allow_redirects=False)
-        except Exception as exc:
-            log.warning("Couldn't test %s from inside the container (%s); trying it with the Pixoo anyway", url, exc)
-            return True
+        deadline, waited = time.monotonic() + wait_seconds, False
+        while True:
+            try:
+                resp = requests.get(url, timeout=HTTP_TIMEOUT, allow_redirects=False)
+                break
+            except Exception as exc:
+                if time.monotonic() >= deadline:
+                    log.warning("Couldn't test %s from inside the container (%s); "
+                                "trying it with the Pixoo anyway", url, exc)
+                    return True
+                if not waited:
+                    waited = True
+                    log.info("%s isn't answering yet (%s); waiting up to %ss for it to come up",
+                             url, exc, wait_seconds)
+                time.sleep(SELF_CHECK_INTERVAL)
+        if waited:
+            log.info("%s came up after the wait", url)
         if 300 <= resp.status_code < 400:
             log.warning("%s redirects to %s, which the Pixoo can't follow (no TLS). Pushing frames instead.",
                         url, resp.headers.get("Location"))
@@ -659,9 +679,18 @@ def run():
         except Exception as exc:
             log.warning("Could not set brightness: %s", exc)
 
-    on_screen, failures = None, 0
+    on_screen, failures, retry_hosted_at = None, 0, None
     while True:
         started = gif_host.heartbeat = time.monotonic()
+
+        # A Pixoo that couldn't fetch may just have been waiting on something that has
+        # since come up, so look again now and then rather than pushing frames forever.
+        if use_url and not hosted and retry_hosted_at and started >= retry_hosted_at:
+            hosted = gif_host.self_check(wait_seconds=0)
+            retry_hosted_at = None if hosted else started + HOSTED_RETRY_SECONDS
+            if hosted:
+                log.info("Trying hosted GIFs again")
+
         try:
             frames, frame_ms, summary = radar_page()
             failures = 0
@@ -689,8 +718,10 @@ def run():
                         # A fetch that fails leaves the Pixoo unresponsive for a minute or so,
                         # so don't keep trying, and give it time before pushing frames.
                         hosted = False
+                        retry_hosted_at = time.monotonic() + HOSTED_RETRY_SECONDS
                         log.warning("The Pixoo didn't fetch %s: it can't resolve or reach that address "
-                                    "(DNS or firewall on its network?). Pushing frames until restart.", url)
+                                    "(DNS or firewall on its network?). Pushing frames; trying the URL "
+                                    "again in %s minutes.", url, round(HOSTED_RETRY_SECONDS / 60))
                         time.sleep(60)
                 if not played:
                     pixoo.show(frames, frame_ms)

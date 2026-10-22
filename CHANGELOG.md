@@ -6,6 +6,22 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- Hosted GIFs falling back to pushed frames ("Loading..") on Docker Swarm. Swarm
+  doesn't add a task to the ingress routing mesh until its healthcheck passes, so the
+  app's own published address refused connections during start-up and the self-check
+  gave up at t=0. The self-check now waits for the address to come up
+  (`SELF_CHECK_WAIT`, 120 s) and the image's healthcheck runs every 10 s instead of 30 s
+  so the task is routed sooner.
+
+### Changed
+- A Pixoo that fails to fetch a hosted GIF no longer pins the app to pushed frames until
+  restart: the URL is re-tested every `HOSTED_RETRY_SECONDS` (30 min) and hosted GIFs
+  resume on their own once it works.
+
+### Added
+- `SELF_CHECK_WAIT` and `HOSTED_RETRY_SECONDS` settings.
+
 ## [0.1.0] - 2026-10-22
 
 First public release, extracted from a single-file Docker Swarm stack.

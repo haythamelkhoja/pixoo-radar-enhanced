@@ -50,6 +50,8 @@ traffic without one is skipped.
 |---|---|---|
 | `GIF_BASE_URL` | *(empty)* | Base URL **the Pixoo** uses to download animations from this app, e.g. `http://192.168.1.20:8765`. Must be plain `http` and must not redirect. Point it at the app's own port, not a reverse proxy. A hostname is resolved by the app and handed to the Pixoo as an IP, so the Pixoo doesn't need working DNS for it. Empty means push frames instead (shows "Loading.." on each update). |
 | `GIF_PORT` | `8765` | Port the built-in web server listens on. It serves the hosted GIFs, the browser view at `/` and `/health`. If you change it, change the published port (`-p`, `ports:`) and `GIF_BASE_URL` to match. |
+| `SELF_CHECK_WAIT` | `120` | Seconds to wait at start-up for `GIF_BASE_URL` to start answering before giving up on testing it. Docker Swarm doesn't route a published port to a task until the task's healthcheck passes, so the app's own address refuses connections for the first half-minute. Lower it only if start-up feels slow. |
+| `HOSTED_RETRY_SECONDS` | `1800` | After the Pixoo fails to fetch a hosted GIF the app pushes frames instead, then re-tests the URL this often and returns to hosted GIFs when it works. Raise it if a blocked Pixoo makes the screen stutter every half hour. |
 
 Examples:
 
