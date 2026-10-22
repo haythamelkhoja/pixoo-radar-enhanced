@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-22
+
 ### Fixed
 - Hosted GIFs falling back to pushed frames ("Loading..") on Docker Swarm. Swarm
   doesn't add a task to the ingress routing mesh until its healthcheck passes, so the
@@ -47,5 +49,6 @@ First public release, extracted from a single-file Docker Swarm stack.
 ### Fixed
 - Climb/descent arrows (▲/▼) after the altitude, which had been lost from the font.
 
-[Unreleased]: https://github.com/haythamelkhoja/pixoo-radar-enhanced/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/haythamelkhoja/pixoo-radar-enhanced/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/haythamelkhoja/pixoo-radar-enhanced/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/haythamelkhoja/pixoo-radar-enhanced/releases/tag/v0.1.0
