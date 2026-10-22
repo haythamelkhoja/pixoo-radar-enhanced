@@ -1,0 +1,57 @@
+# Pixoo Radar - Docker Swarm stack
+#
+# Deploy:           docker stack deploy -c stack.yml pixooradar
+# Update:           docker service update --image ghcr.io/haythamelkhoja/pixoo-radar-enhanced:latest pixooradar_radar
+# Logs:             docker service logs -f pixooradar_radar
+# See the screen:   https://pixooradar.example.com shows what the Pixoo is showing
+#
+# Every setting is an environment variable; see docs/configuration.md for the full list.
+#
+# No "Loading.." screen: the Pixoo fetches each animation straight from the app on the
+# published port 8765, bypassing Traefik (whose http->https redirect it can't follow).
+# The app resolves the GIF_BASE_URL hostname (any swarm node, where 8765 is published too)
+# and hands the Pixoo the IP. The Pixoo's network must be allowed to reach the swarm
+# nodes on TCP 8765. If it can't fetch, the app pushes frames instead (with "Loading..")
+# and says why in the logs.
+
+version: "3.8"
+
+services:
+  radar:
+    image: ghcr.io/haythamelkhoja/pixoo-radar-enhanced:latest
+    environment:
+      PIXOO_HOST: 192.168.1.50          # IP or hostname of your Pixoo64
+      HOME_LAT: "51.4700"               # your location
+      HOME_LON: "-0.4543"
+      RADAR_RADIUS_KM: "100"
+      REFRESH_SECONDS: "60"             # how often to look for the closest flight
+      COLOR_BOX: "#2B2B2B"
+      GIF_BASE_URL: "http://pixooradar.example.com:8765"   # app's own port: no Traefik, no redirect
+      GIF_PORT: "8765"
+      TZ: Europe/London
+    networks:
+      - public
+    ports:
+      - target: 8765                    # plain-http GIF server the Pixoo fetches from
+        published: 8765
+        protocol: tcp
+        mode: ingress
+    deploy:
+      replicas: 1                       # only one instance should drive the Pixoo
+      update_config:
+        order: stop-first
+      restart_policy:
+        condition: any
+        delay: 30s
+      labels:
+        traefik.enable: "true"
+        traefik.http.routers.pixooradar.rule: "Host(`pixooradar.example.com`)"
+        traefik.http.routers.pixooradar.entrypoints: "websecure, web"
+        traefik.http.routers.pixooradar.tls: "true"
+        traefik.http.routers.pixooradar.tls.certresolver: "myresolver"
+        traefik.http.routers.pixooradar.service: "pixooradar"
+        traefik.http.services.pixooradar.loadbalancer.server.port: "8765"   # = GIF_PORT
+
+networks:
+  public:
+    external: true

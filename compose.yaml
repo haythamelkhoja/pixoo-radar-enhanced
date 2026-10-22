@@ -1,0 +1,16 @@
+# Pixoo Radar - Docker Compose
+#
+#   cp .env.example .env      # then set PIXOO_HOST, HOME_LAT, HOME_LON, GIF_BASE_URL
+#   docker compose up -d
+#   docker compose logs -f
+#
+# Open http://<this-host>:8765 to see what the Pixoo is showing.
+
+services:
+  radar:
+    image: ghcr.io/haythamelkhoja/pixoo-radar-enhanced:latest
+    container_name: pixoo-radar
+    env_file: .env
+    ports:
+      - "8765:8765"   # plain-http GIF server the Pixoo fetches from (keep in sync with GIF_PORT)
+    restart: unless-stopped
