@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-10-23
+
 ### Added
 - Pushing a version tag also publishes the GitHub Release, with the matching changelog
   section as its notes. Release steps are in `docs/releasing.md`.
@@ -66,7 +68,8 @@ First public release, extracted from a single-file Docker Swarm stack.
 ### Fixed
 - Climb/descent arrows (▲/▼) after the altitude, which had been lost from the font.
 
-[Unreleased]: https://github.com/haythamelkhoja/pixoo-radar-enhanced/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/haythamelkhoja/pixoo-radar-enhanced/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/haythamelkhoja/pixoo-radar-enhanced/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/haythamelkhoja/pixoo-radar-enhanced/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/haythamelkhoja/pixoo-radar-enhanced/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/haythamelkhoja/pixoo-radar-enhanced/releases/tag/v0.1.0
