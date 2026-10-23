@@ -9,7 +9,7 @@
 #   sudo ./install.sh                 # from a clone: installs the files next to this script
 #   sudo ./install.sh --uninstall     # removes the service and app (keeps /etc/pixoo-radar.env)
 #
-# PIXOO_RADAR_VERSION=v0.1.0 picks a release (default: the latest one).
+# PIXOO_RADAR_VERSION=vX.Y.Z picks a release (default: the latest one).
 
 set -euo pipefail
 

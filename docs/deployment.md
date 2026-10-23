@@ -13,7 +13,8 @@ Pick one. Run **only one instance per Pixoo**: two would fight over the screen.
 | [Plain Python](#plain-python) | Development. |
 
 The image is `ghcr.io/haythamelkhoja/pixoo-radar-enhanced`, for `linux/amd64` and `linux/arm64`.
-Tags: `latest`, the exact version (`0.1.2`) and the minor series (`0.1`).
+Tags: `latest`, each exact version (e.g. `1.4.2`), its minor series (`1.4`) and its major
+series (`1`). Versions are listed under [Releases](https://github.com/haythamelkhoja/pixoo-radar-enhanced/releases).
 
 Whatever you choose, the Pixoo's network must be able to reach the app on TCP 8765
 (for hosted GIFs) and the app must be able to reach the Pixoo on TCP 80. See
@@ -71,7 +72,8 @@ docker stack deploy -c stack.yml pixooradar
 docker service logs -f pixooradar_radar
 ```
 
-Update to a new release: `docker service update --image ghcr.io/haythamelkhoja/pixoo-radar-enhanced:0.1.2 pixooradar_radar`
+Update to a new release: `docker service update --image ghcr.io/haythamelkhoja/pixoo-radar-enhanced:<version> pixooradar_radar`,
+with `<version>` from [Releases](https://github.com/haythamelkhoja/pixoo-radar-enhanced/releases)
 (or deploy the stack again with `latest` and `--resolve-image always`).
 
 `GIF_BASE_URL` can be any name resolving to a swarm node, with `http://` and `:8765`.
@@ -142,7 +144,7 @@ It:
 | Logs | `journalctl -u pixoo-radar -f` |
 | Change settings | `sudo nano /etc/pixoo-radar.env && sudo systemctl restart pixoo-radar` |
 | Upgrade | run the installer again |
-| Specific version | `curl ... \| sudo PIXOO_RADAR_VERSION=v0.1.0 bash` |
+| Specific version | `curl ... \| sudo PIXOO_RADAR_VERSION=vX.Y.Z bash` |
 | Uninstall | `sudo ./install.sh --uninstall` (or pipe it with `bash -s -- --uninstall`) |
 
 ## Proxmox LXC

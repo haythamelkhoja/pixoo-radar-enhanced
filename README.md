@@ -135,6 +135,7 @@ redirects. See [troubleshooting](docs/troubleshooting.md#the-pixoo-cant-follow-h
 - [Deployment](docs/deployment.md)
 - [How it works](docs/how-it-works.md)
 - [Troubleshooting](docs/troubleshooting.md)
+- [Releasing](docs/releasing.md)
 
 ## Disclaimer
 

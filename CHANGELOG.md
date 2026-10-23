@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Pushing a version tag also publishes the GitHub Release, with the matching changelog
+  section as its notes. Release steps are in `docs/releasing.md`.
+
+### Changed
+- Docs and `stack.yml` no longer pin a specific version; they point to the Releases page.
+
 ## [0.1.2] - 2026-10-22
 
 ### Changed

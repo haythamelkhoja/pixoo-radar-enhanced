@@ -1,7 +1,8 @@
 # Pixoo Radar - Docker Swarm stack
 #
 # Deploy:           docker stack deploy -c stack.yml pixooradar
-# Update:           docker service update --image ghcr.io/haythamelkhoja/pixoo-radar-enhanced:0.1.2 pixooradar_radar
+# Update:           docker service update --image ghcr.io/haythamelkhoja/pixoo-radar-enhanced:<version> pixooradar_radar
+#                   (versions: https://github.com/haythamelkhoja/pixoo-radar-enhanced/releases)
 # Logs:             docker service logs -f pixooradar_radar
 # See the screen:   http://<any-swarm-node>:8765 shows what the Pixoo is showing
 #
