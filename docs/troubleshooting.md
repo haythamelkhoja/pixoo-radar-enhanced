@@ -12,6 +12,25 @@ INFO http://192.168.1.20:8765 reaches this app over plain http
 INFO Showing VS137 LHR->JFK A339 1925FT▲ 5.6KM
 ```
 
+**Run `--check` first** (commands for each install type are in
+[deployment](deployment.md#checking-the-setup)). It tests every part of the setup and
+says which one is broken:
+
+```text
+Pixoo Radar 0.4.0
+
+✓ Settings are valid
+✓ Pixoo at 192.168.1.50 answers (41 ms)
+✓ adsb: 63 aircraft in the area, 21 to choose from within 100 km
+- Closest: BA505 A320 6.1 km NE
+✓ http://192.168.1.20:8765 reaches this app over plain http
+✗ The Pixoo didn't download http://192.168.1.20:8765/... within 15 s: it can't reach this
+  address (firewall or DNS on its network?). It may be unresponsive for a minute.
+✓ History can be written to /data/history.sqlite
+
+1 problem(s) found.
+```
+
 ## The Pixoo shows "Loading.." on every update
 
 That's the **pushed-frames** mode. When frames are uploaded one by one over the Pixoo's
@@ -104,7 +123,7 @@ network that isn't allowed to talk to servers. You need both directions:
 | From | To | Port | Why |
 |---|---|---|---|
 | App host | Pixoo | TCP 80 | API commands (always) |
-| Pixoo | App host (or every Swarm node) | TCP 8765 (`GIF_PORT`) | GIF downloads (hosted mode) |
+| Pixoo | App host (or every Swarm node) | TCP 8765 (`WEB_PORT`) | GIF downloads (hosted mode) |
 
 For example on OPNsense/pfSense/UniFi, add an allow rule on the IoT network:
 *source* = Pixoo's IP, *destination* = the Docker host (or the Swarm nodes),
@@ -138,6 +157,11 @@ Things to try in the meantime:
   the app, and turn off any clock or time-display options.
 - If the overlay bothers you more than the "Loading.." flash, leave `GIF_BASE_URL`
   empty to use pushed frames.
+
+## The app exits listing settings
+
+Every value is checked at start-up, and all problems are listed at once, e.g.
+`COLOR_BOX='#2B2B2': use a colour like #FFAA00`. Fix each line and start again.
 
 ## "Missing required setting(s): ..."
 
@@ -207,6 +231,17 @@ after 6 hours. Set `LOGO_SOURCES=none` if you prefer names for everyone.
 `/health` returns 503 when the main loop hasn't run for `3 × REFRESH_SECONDS + 600`
 seconds. Check the logs for what it's stuck on and open an issue with them.
 `curl http://localhost:8765/health` shows the details.
+
+## Picking a flight doesn't stick
+
+A flight picked on the web page goes back to automatic when it's missing from two
+updates in a row: it flew out of range or landed. A restart also returns to automatic.
+The log says `Back to automatic: <flight> ...` with the reason.
+
+## "GIF_PORT has been renamed to WEB_PORT"
+
+Settings renamed in 0.4.0 still work, but the log reminds you to update them; see
+[configuration](configuration.md#renamed-settings).
 
 ## The browser view is blank
 

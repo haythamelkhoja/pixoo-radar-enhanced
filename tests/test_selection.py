@@ -104,3 +104,38 @@ def test_history_sees_every_candidate(pr, monkeypatch, tmp_path):
     monkeypatch.setattr(pr, "history", pr.History("sqlite", str(tmp_path)))
     fetch_with(pr, monkeypatch, [make_aircraft(pr), make_aircraft(pr, hex="400001", callsign="BAW1")])
     assert {e["callsign"] for e in pr.history.entries()} == {"UAE29", "BAW1"}
+
+
+def test_pinned_flight_wins(pr, monkeypatch):
+    near = make_aircraft(pr)
+    far = make_aircraft(pr, hex="406d8e", callsign="EZY97ND", flight=None, aircraft="A320", latitude=51.70)
+    n = fetch_with(pr, monkeypatch, [near, far])
+    assert n.callsign == "UAE29" and not n.pinned
+    n = pr.fetch_nearest({"hex": "406d8e", "callsign": "EZY97ND"})
+    assert n.callsign == "EZY97ND" and n.pinned and [r["flight"] for r in n.traffic] == ["EK29", "EZY97ND"]
+
+
+def test_pinned_by_callsign_when_no_address(pr, monkeypatch):
+    plane = make_aircraft(pr, hex="", callsign="BAW1", latitude=51.6)
+    monkeypatch.setattr(pr, "fetch_traffic", lambda: [make_aircraft(pr), plane])
+    monkeypatch.setattr(pr.SOURCES["adsb"], "enrich", lambda a: None)
+    assert pr.fetch_nearest({"hex": "", "callsign": "BAW1"}).callsign == "BAW1"
+
+
+def test_pinned_ignores_filters_but_not_landing(pr, monkeypatch):
+    monkeypatch.setattr(pr.SOURCES["adsb"], "enrich", lambda a: None)
+    heli = make_aircraft(pr, hex="400001", callsign="HLE1", aircraft="EC35")     # filtered from auto, but pinnable
+    monkeypatch.setattr(pr, "fetch_traffic", lambda: [make_aircraft(pr), heli])
+    assert pr.fetch_nearest({"hex": "400001"}).callsign == "HLE1"
+    landed = make_aircraft(pr, hex="400001", callsign="HLE1", on_ground=True)
+    monkeypatch.setattr(pr, "fetch_traffic", lambda: [make_aircraft(pr), landed])
+    n = pr.fetch_nearest({"hex": "400001"})
+    assert n.callsign == "UAE29" and not n.pinned                                 # landed: auto pick instead
+
+
+def test_pinned_alone_in_the_sky(pr, monkeypatch):
+    monkeypatch.setattr(pr.SOURCES["adsb"], "enrich", lambda a: None)
+    private = make_aircraft(pr, hex="400002", callsign="GABCD", airline_flight=False)   # no auto candidates at all
+    monkeypatch.setattr(pr, "fetch_traffic", lambda: [private])
+    assert pr.fetch_nearest() is None
+    assert pr.fetch_nearest({"hex": "400002"}).callsign == "GABCD"

@@ -35,6 +35,11 @@ registration, speed and distance.
 - **Helicopters ignored** by default, optionally anything without a known destination.
 - **Live web page**: open `http://<host>:8765` for the current screen, the flight's
   details, a table of nearby traffic and today's counts, updating every few seconds.
+- **Pick a flight**: click any flight in that table and it goes on the Pixoo straight
+  away; click it again (or *Back to auto*) to return to automatic. It also goes back to
+  automatic by itself when the plane leaves the area or lands.
+- **`--check`**: tests the Pixoo, data sources, `GIF_BASE_URL` (by having the Pixoo
+  download a test screen), history and MQTT, and prints what works.
 - **History** (optional): every aircraft that passes, in SQLite or CSV, trimmed after
   `HISTORY_RETENTION_DAYS`.
 - **MQTT and Home Assistant** (optional): sensors appear by themselves, plus a
@@ -64,6 +69,12 @@ Not using Docker? On Debian, Ubuntu, Raspberry Pi OS or a Proxmox LXC container:
 curl -fsSL https://raw.githubusercontent.com/haythamelkhoja/pixoo-radar-enhanced/main/install.sh | sudo bash
 ```
 
+Something not working? Run the built-in check (see [troubleshooting](docs/troubleshooting.md)):
+
+```sh
+docker compose exec radar python /app/pixoo_radar.py --check
+```
+
 Just want to try it without a Pixoo?
 
 ```sh
@@ -81,7 +92,7 @@ Everything is an environment variable. Only the first three are required.
 | `HOME_LAT` | *(required)* | Your latitude in decimal degrees, e.g. `51.4700`. |
 | `HOME_LON` | *(required)* | Your longitude in decimal degrees, e.g. `-0.4543`. |
 | `GIF_BASE_URL` | *(empty)* | Plain-`http` address where the **Pixoo** can reach this app, e.g. `http://192.168.1.20:8765`. Enables hosted GIFs (no "Loading.."). Empty = push frames. |
-| `GIF_PORT` | `8765` | Port of the built-in web server (hosted GIFs, browser view, `/health`). |
+| `WEB_PORT` | `8765` | Port of the built-in web server (hosted GIFs, live page, API, `/health`). Was `GIF_PORT`. |
 | `RADAR_RADIUS_KM` | `100` | Search radius around home, whole kilometres. |
 | `REFRESH_SECONDS` | `60` | How often to look for the closest flight. |
 | `SHOW_GROUND_TRAFFIC` | `false` | `true` to include parked and taxiing aircraft. |
@@ -98,7 +109,7 @@ Everything is an environment variable. Only the first three are required.
 | `RARE_REGISTRATIONS` | *(empty)* | Comma-separated registrations that count as rare, e.g. special liveries. |
 | `MILITARY_CALLSIGNS` | `rch,cnv,pat,…` | Callsign prefixes / operator codes treated as military (on top of US/UK military addresses and military types). |
 | `FRAME_MS` | `300` | Animation frame time in milliseconds. |
-| `SHOW_DIRECTION` | `true` | Show the compass direction to the plane (`NE`) in place of the "DIST" label. |
+| `SHOW_BEARING` | `true` | Show the compass direction to the plane (`NE`) in place of the "DIST" label. Was `SHOW_DIRECTION`. |
 | `SHOW_HEADING` | `true` | Arrow after the speed for the way the plane is flying. |
 | `SPLIT_FLAP` | `off` | `all` puts the flight values on departures-board tiles that flip to each new value; `digits` flips only tiles showing a number. |
 | `PIXOO_BRIGHTNESS` | `-1` | Set brightness `0`–`100` at start-up; `-1` leaves it alone. |

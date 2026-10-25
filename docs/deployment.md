@@ -180,9 +180,27 @@ PIXOO_HOST=192.168.1.50 HOME_LAT=51.4700 HOME_LON=-0.4543 \
   GIF_BASE_URL=http://192.168.1.20:8765 python src/pixoo_radar.py
 ```
 
+## Checking the setup
+
+`--check` tests each part and prints a ✓/✗ list: settings, the Pixoo's API, each data
+source (and adsbdb), `GIF_BASE_URL` (including a real download by the Pixoo, which shows
+a *CHECK OK* screen for a moment), the history folder and the MQTT login. It exits with 1
+if anything failed.
+
+| Install | Command |
+|---|---|
+| Compose | `docker compose exec radar python /app/pixoo_radar.py --check` |
+| docker run | `docker exec pixoo-radar python /app/pixoo_radar.py --check` |
+| Swarm | `docker exec $(docker ps -qf name=pixooradar_radar) python /app/pixoo_radar.py --check` (on the node running it) |
+| install.sh | `sudo systemd-run --pty --quiet -p EnvironmentFile=/etc/pixoo-radar.env -p User=pixoo-radar /opt/pixoo-radar/venv/bin/python /opt/pixoo-radar/pixoo_radar.py --check` |
+
+Run inside a running app, the port is already taken, so the Pixoo-download test is
+skipped (the running app's log reports that instead). `--version` prints the version;
+it's also in the log, on the web page, in `/health` and on the Home Assistant device.
+
 ## Health check
 
-`GET /health` on `GIF_PORT`:
+`GET /health` on `WEB_PORT`:
 
 ```json
 {"status": "ok", "last_loop_seconds_ago": 12, "showing": true}

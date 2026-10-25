@@ -6,6 +6,29 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Pick a flight on the live web page: click it in the traffic table and it's on the
+  Pixoo within a second or two (with a PIN badge); click it again or *Back to auto* to
+  return to automatic. It also returns to automatic when the plane leaves or lands.
+  API: `POST /api/pin`, `DELETE /api/pin`.
+- `--check`: tests settings, the Pixoo, each data source, adsbdb, `GIF_BASE_URL` (with a
+  real download by the Pixoo), history and MQTT, and prints a ✓/✗ list.
+- `--version`, and the version in the log, `/health`, `/api/current`, the web page, the
+  Home Assistant device and the User-Agent. Docker images and `install.sh` record the
+  release they were built from.
+
+### Changed
+- Every setting is checked at start-up, and all problems are reported together:
+  out-of-range coordinates, radius, refresh (now at least 10 s), frame time and
+  brightness, malformed colours, ports, unknown sources, `https://` or malformed
+  `GIF_BASE_URL`, misspelt true/false values, half-set OpenSky credentials.
+- Renamed `GIF_PORT` to `WEB_PORT` and `SHOW_DIRECTION` to `SHOW_BEARING`. The old names
+  still work and log a warning.
+
+### Fixed
+- Restarting with history on no longer counts the aircraft in range twice: visits in
+  progress are picked up again.
+
 ## [0.3.0] - 2026-10-25
 
 ### Added

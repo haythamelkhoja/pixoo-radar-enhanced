@@ -52,7 +52,7 @@ def test_health(pr, host, monkeypatch):
 
 def test_api_current(pr, host):
     body = json.loads(get(host.url + "/api/current")[2])
-    assert body == {"screen": 0, "age_seconds": None}
+    assert body == {"screen": 0, "age_seconds": None, "pinned": None, "version": pr.__version__}
     host.set_status(flight={"flight": "EK29"}, traffic=[], mode="pushed frames")
     body = json.loads(get(host.url + "/api/current")[2])
     assert body["flight"]["flight"] == "EK29" and body["age_seconds"] == 0
@@ -75,3 +75,49 @@ def test_status_is_json_serialisable(pr, monkeypatch):
     assert json.loads(json.dumps(flight))["tags"] == ["rare"] and flight["heading_text"] == "← 275°"
     n.heading = None
     assert pr._flight_status(n)["heading_text"] is None
+
+
+def post(url, body, method="POST", ctype="application/json"):
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), method=method, headers={"Content-Type": ctype})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status, json.loads(resp.read())
+    except urllib.error.HTTPError as err:
+        body = err.read()
+        return err.code, json.loads(body) if body.startswith(b"{") else {}
+
+
+def test_pin_api(pr, host):
+    assert not host.wake.is_set()
+    status, body = post(host.url + "/api/pin", {"hex": "406D8E", "callsign": "ezy97nd", "flight": "EZY97ND"})
+    assert status == 200 and body["pinned"]["hex"] == "406d8e" and body["pinned"]["callsign"] == "EZY97ND"
+    assert host.wake.is_set()                                   # the main loop gets woken up
+    assert json.loads(get(host.url + "/api/current")[2])["pinned"]["flight"] == "EZY97ND"
+    host.wait(0)
+    assert not host.wake.is_set()
+    req = urllib.request.Request(host.url + "/api/pin", method="DELETE")
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        assert json.loads(resp.read()) == {"pinned": None}
+    assert host.pin is None and host.wake.is_set()
+
+
+@pytest.mark.parametrize("body, ctype, code", [({"hex": "zzzzzz"}, "application/json", 400),
+                                               ({"callsign": "BAW 1"}, "application/json", 400),
+                                               ({}, "application/json", 400),
+                                               ({"hex": "406d8e"}, "text/plain", 415),
+                                               ({"hex": "406d8e"}, "application/x-www-form-urlencoded", 415)])
+def test_pin_api_refuses_bad_requests(pr, host, body, ctype, code):
+    assert post(host.url + "/api/pin", body, ctype=ctype)[0] == code and host.pin is None
+
+
+def test_pin_api_other_paths(pr, host):
+    assert post(host.url + "/api/other", {"hex": "406d8e"})[0] == 404
+
+
+def test_page_has_pick_controls(pr, host):
+    page = get(host.url + "/")[2].decode()
+    assert 'fetch("api/pin"' in page and "Back to auto" in page and "PINNED" in page
+
+
+def test_health_reports_version(pr, host):
+    assert json.loads(get(host.url + "/health")[2])["version"] == pr.__version__

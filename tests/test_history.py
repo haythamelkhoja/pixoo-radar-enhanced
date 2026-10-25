@@ -83,10 +83,10 @@ def test_keep_forever(pr, tmp_path):
 
 
 def test_persists_across_restarts(pr, history, tmp_path):
-    history.observe([visit(pr)], now=NOW)
+    history.observe([visit(pr)], now=time.time() - 2 * history.GAP)   # a visit that ended before the restart
     history.close()
     again = pr.History(history.kind, str(tmp_path))
-    assert len(stored(again)) == 1
+    assert len(stored(again)) == 1 and not again.active
     if history.kind == "csv":
         with open(again.path, newline="") as fh:
             assert sum(1 for row in csv.reader(fh) if row[0] == "first_seen") == 1   # header written once
@@ -103,3 +103,23 @@ def test_stats(pr, history):
 def test_aircraft_without_identity_is_skipped(pr, history):
     history.observe([visit(pr, hex="", callsign="")], now=NOW)
     assert history.entries() == []
+
+
+def test_restart_continues_visits_in_progress(pr, history, tmp_path):
+    now = time.time()
+    history.observe([(make_aircraft(pr), ("rare",), 4.2)], now=now - 120)
+    history.observe([visit(pr, hex="000009", callsign="OLD1")], now=now - 3 * history.GAP)   # long gone
+    history.observe([visit(pr)], now=now - 60)
+    history.close()                                            # shutdown writes all visits
+
+    again = pr.History(history.kind, str(tmp_path))
+    assert set(again.active) == {"4010ee"}                    # the recent one is resumed
+    assert [r["callsign"] for r in stored(again)] == ["OLD1"]
+    again.observe([visit(pr)], now=now)                        # still in range after the restart
+    again.close()
+    final = pr.History(history.kind, str(tmp_path))
+    rows = {r["callsign"]: r for r in final.entries()}
+    assert len(final.entries()) == 2                           # counted once, not twice
+    assert rows["UAE29"]["closest_km"] == 4.2 and rows["UAE29"]["tags"] == ["rare"]
+    assert rows["UAE29"]["first_seen"] == pr._iso(now - 120)
+    final.close()

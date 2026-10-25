@@ -19,7 +19,7 @@ Install:   pip install -r requirements.txt
 Run:       PIXOO_HOST=192.168.1.50 HOME_LAT=51.4700 HOME_LON=-0.4543 python pixoo_radar.py
 Preview:   HOME_LAT=51.4700 HOME_LON=-0.4543 python pixoo_radar.py --preview ./preview
            (renders PNGs and the GIF, no Pixoo needed)
-Health:    GET /health on GIF_PORT -> 200 while the main loop is running, 503 if it stalls
+Health:    GET /health on WEB_PORT -> 200 while the main loop is running, 503 if it stalls
 
 Every setting below can be overridden with an environment variable of the same
 name, e.g.  PIXOO_HOST=192.168.1.50 REFRESH_SECONDS=90 python pixoo_radar.py
@@ -32,6 +32,7 @@ or from adsb.lol, your own ADS-B receiver or OpenSky, with details from adsbdb.c
 
 import argparse
 import base64
+import calendar
 import csv
 import hashlib
 import ipaddress
@@ -45,6 +46,7 @@ import signal
 import socket
 import sqlite3
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -63,19 +65,32 @@ from PIL import Image, ImageChops, ImageDraw
 # Settings (each can be overridden by an environment variable of the same name)
 # =============================================================================
 
-def _setting(name, default):
+SETTING_PROBLEMS = []     # bad values, reported together at start-up (and by --check)
+RENAMED_SETTINGS = []     # (old, new) names still in use, logged as a warning
+
+
+def _setting(name, default, old_name=None):
     raw = os.environ.get(name, "").strip()
+    if not raw and old_name and os.environ.get(old_name, "").strip():
+        raw = os.environ[old_name].strip()
+        RENAMED_SETTINGS.append((old_name, name))
+        name = old_name
     if not raw:
         return default
     if isinstance(default, bool):
-        return raw.lower() in ("1", "true", "yes", "on")
+        if raw.lower() in ("1", "true", "yes", "on"):
+            return True
+        if raw.lower() not in ("0", "false", "no", "off"):
+            SETTING_PROBLEMS.append(f"{name}={raw!r}: use true or false")
+        return False if raw.lower() in ("0", "false", "no", "off") else default
     try:
         if isinstance(default, int):
             return int(raw)
         if isinstance(default, float):
             return float(raw)
     except ValueError:
-        sys.exit(f"{name}={raw!r} isn't a valid {'whole number' if isinstance(default, int) else 'number'}")
+        SETTING_PROBLEMS.append(f"{name}={raw!r} isn't a valid {'whole number' if isinstance(default, int) else 'number'}")
+        return default
     if isinstance(default, tuple):
         return tuple(part.strip().lower() for part in raw.split(",") if part.strip())
     return raw
@@ -118,11 +133,11 @@ COLOR_RARE = _setting("COLOR_RARE", "#00C8FF")
 
 REFRESH_SECONDS = _setting("REFRESH_SECONDS", 60)          # how often to look for the closest flight
 FRAME_MS = _setting("FRAME_MS", 300)                         # animation speed
-SHOW_DIRECTION = _setting("SHOW_DIRECTION", True)            # compass point of the plane in place of "DIST"
+SHOW_BEARING = _setting("SHOW_BEARING", True, "SHOW_DIRECTION")  # compass point of the plane in place of "DIST"
 SHOW_HEADING = _setting("SHOW_HEADING", True)                # arrow after the speed: the way it's flying
 # Flight values on flipping departures-board tiles: off, all (every character) or digits
-SPLIT_FLAP = {"1": "all", "true": "all", "yes": "all", "on": "all", "all": "all", "digits": "digits"}.get(
-    _setting("SPLIT_FLAP", "off").lower(), "off")
+SPLIT_FLAP = {"1": "all", "true": "all", "yes": "all", "on": "all", "all": "all", "digits": "digits",
+              "0": "off", "false": "off", "no": "off", "off": "off"}.get(_setting("SPLIT_FLAP", "off").lower())
 
 LOGO_SOURCES = _setting("LOGO_SOURCES", ("fr24", "avcodes"))  # tried in order
 
@@ -131,7 +146,7 @@ LOGO_SOURCES = _setting("LOGO_SOURCES", ("fr24", "avcodes"))  # tried in order
 # resolved here and handed to the Pixoo as an IP. Leave empty to push frames instead.
 # Opening the server's root in a browser shows what the Pixoo is showing.
 GIF_BASE_URL = _setting("GIF_BASE_URL", "")
-GIF_PORT = _setting("GIF_PORT", 8765)
+WEB_PORT = _setting("WEB_PORT", 8765, "GIF_PORT")   # the built-in web server: GIFs, live page, API, /health
 
 COLOR_TEXT = _setting("COLOR_TEXT", "#FFFF00")    # flight details
 COLOR_BOX = _setting("COLOR_BOX", "#2B2B2B")      # panels behind text
@@ -163,6 +178,83 @@ SELF_CHECK_WAIT = _setting("SELF_CHECK_WAIT", 120)   # how long our own address 
 SELF_CHECK_INTERVAL = 5                              # answering (Swarm routes to healthy tasks only)
 HOSTED_RETRY_SECONDS = _setting("HOSTED_RETRY_SECONDS", 1800)  # re-try hosted GIFs this often
 AVCODES_URL = "https://raw.githubusercontent.com/Jxck-S/airline-logos/main/avcodes_banners/{icao}.png"
+KNOWN_SOURCES = ("fr24", "adsb", "opensky")
+KNOWN_LOGO_SOURCES = ("fr24", "avcodes", "none")
+
+
+def _check_settings():
+    """Add a message to SETTING_PROBLEMS for every value that can't work."""
+    global SPLIT_FLAP
+    problems = SETTING_PROBLEMS
+
+    def need(ok, message):
+        if not ok:
+            problems.append(message)
+
+    if SPLIT_FLAP is None:
+        problems.append(f"SPLIT_FLAP={os.environ.get('SPLIT_FLAP')!r}: use off, all or digits")
+        SPLIT_FLAP = "off"
+    need(-90 <= HOME_LAT <= 90, f"HOME_LAT={HOME_LAT}: must be between -90 and 90")
+    need(-180 <= HOME_LON <= 180, f"HOME_LON={HOME_LON}: must be between -180 and 180")
+    need(1 <= RADAR_RADIUS_KM <= 1000, f"RADAR_RADIUS_KM={RADAR_RADIUS_KM}: must be between 1 and 1000")
+    need(REFRESH_SECONDS >= 10, f"REFRESH_SECONDS={REFRESH_SECONDS}: must be at least 10")
+    need(20 <= FRAME_MS <= 10000, f"FRAME_MS={FRAME_MS}: must be between 20 and 10000")
+    need(PIXOO_BRIGHTNESS == -1 or 0 <= PIXOO_BRIGHTNESS <= 100,
+         f"PIXOO_BRIGHTNESS={PIXOO_BRIGHTNESS}: use 0-100, or -1 to leave it alone")
+    for name in ("COLOR_TEXT", "COLOR_BOX", "COLOR_MILITARY", "COLOR_RARE"):
+        value = globals()[name]
+        need(re.fullmatch(r"#?[0-9A-Fa-f]{6}", value), f"{name}={value!r}: use a colour like #FFAA00")
+    for name in ("WEB_PORT", "MQTT_PORT"):
+        need(1 <= globals()[name] <= 65535, f"{name}={globals()[name]}: must be a port number (1-65535)")
+    need(DATA_SOURCE, "DATA_SOURCE is empty: use fr24, adsb or opensky")
+    problems.extend(f"DATA_SOURCE: unknown source {name!r} (use fr24, adsb or opensky)"
+                    for name in DATA_SOURCE if name not in KNOWN_SOURCES)
+    problems.extend(f"LOGO_SOURCES: unknown source {name!r} (use fr24, avcodes or none)"
+                    for name in LOGO_SOURCES if name not in KNOWN_LOGO_SOURCES)
+    need(re.match(r"https?://", ADSB_URL), f"ADSB_URL={ADSB_URL!r}: must start with http:// or https://")
+    if GIF_BASE_URL and "CHANGE-ME" not in GIF_BASE_URL:
+        if GIF_BASE_URL.lower().startswith("https://"):
+            problems.append(f"GIF_BASE_URL={GIF_BASE_URL!r}: the Pixoo can't fetch https; "
+                            "use the app's own http:// address")
+        else:
+            need(re.match(r"http://[^/:]+", GIF_BASE_URL),
+                 f"GIF_BASE_URL={GIF_BASE_URL!r}: must look like http://192.168.1.20:{WEB_PORT}")
+    need(HISTORY in ("off", "sqlite", "csv"), f"HISTORY={HISTORY!r}: use off, sqlite or csv")
+    need(HISTORY_RETENTION_DAYS >= 0, f"HISTORY_RETENTION_DAYS={HISTORY_RETENTION_DAYS}: must be 0 (keep all) or more")
+    need(HISTORY_TRIM_HOURS >= 0, f"HISTORY_TRIM_HOURS={HISTORY_TRIM_HOURS}: must be 0 (never) or more")
+    need(SELF_CHECK_WAIT >= 0 and HOSTED_RETRY_SECONDS >= 60,
+         "SELF_CHECK_WAIT must be 0 or more and HOSTED_RETRY_SECONDS at least 60")
+    need(bool(OPENSKY_CLIENT_ID) == bool(OPENSKY_CLIENT_SECRET),
+         "OPENSKY_CLIENT_ID and OPENSKY_CLIENT_SECRET go together: set both or neither")
+
+
+_check_settings()
+
+
+def _version():
+    """The release this is: a VERSION file next to the script (Docker, install.sh),
+    $PIXOO_RADAR_VERSION, or `git describe` in a checkout."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    try:
+        with open(os.path.join(here, "VERSION"), encoding="utf-8") as fh:
+            found = fh.read().strip()
+        if found:
+            return found.lstrip("v")
+    except OSError:
+        pass
+    if os.environ.get("PIXOO_RADAR_VERSION"):
+        return os.environ["PIXOO_RADAR_VERSION"].lstrip("v")
+    try:
+        out = subprocess.run(["git", "describe", "--tags", "--always", "--dirty"], cwd=here, capture_output=True,
+                             text=True, timeout=5)
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.strip().lstrip("v")
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return "unknown"
+
+
+__version__ = _version()
 
 log = logging.getLogger("pixoo_radar")
 fr24 = FlightRadar24API(timeout=15)
@@ -374,6 +466,9 @@ margin-left:8px;vertical-align:middle;color:#000}
 table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
 th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
 th{color:var(--dim);font-weight:500}tr.on td{color:var(--accent)}
+tr.pick{cursor:pointer}tr.pick:hover td,tr.pick:focus td{background:#1f1f23;outline:none}
+.tag.pin{background:#fff}button{font:inherit;color:#000;background:var(--accent);border:0;border-radius:8px;
+padding:6px 12px;margin-top:12px;cursor:pointer}
 .scroll{overflow-x:auto}.dim{color:var(--dim);font-size:13px}
 .stats{display:flex;gap:20px;flex-wrap:wrap;margin:6px 0 10px;font-size:22px}.stats .dim{font-size:14px}
 </style>
@@ -381,7 +476,8 @@ th{color:var(--dim);font-weight:500}tr.on td{color:var(--accent)}
   <div class="card"><img id="screen" src="latest.gif" alt="What the Pixoo is showing"></div>
   <div class="card" id="flight"><p class="dim">Waiting for the first flight…</p></div>
   <div class="card wide" id="today" hidden></div>
-  <div class="card wide"><div class="dim" style="margin-bottom:8px">Nearby traffic</div>
+  <div class="card wide"><div class="dim" style="margin-bottom:8px">Nearby traffic · click a flight to show it
+    on the Pixoo, click it again to go back to automatic</div>
     <div class="scroll"><table id="traffic"></table></div></div>
   <p class="dim wide" id="updated"></p>
 </main>
@@ -398,7 +494,9 @@ function render(s) {
   const box = document.getElementById("flight"), f = s.flight;
   if (f) {
     box.replaceChildren();
-    const h = $("h1", f.flight || "?"); tags(h, f.tags); box.append(h);
+    const h = $("h1", f.flight || "?"); tags(h, f.tags);
+    if (f.pinned) h.append($("span", "PINNED", "tag pin"));
+    box.append(h);
     box.append($("div", f.airline || "", "airline"));
     box.append($("div", (f.origin || "---") + " → " + (f.destination || "---"), "route"));
     const dl = $("dl");
@@ -408,13 +506,24 @@ function render(s) {
                           ["Registration", f.registration]]) { dl.append($("dt", k), $("dd", v || "—")); }
     box.append(dl);
   }
+  if (s.pinned) {
+    const auto = $("button", "Back to auto");
+    auto.onclick = () => pick(null);
+    if (!f || !f.pinned) box.append($("p", "Waiting for " + s.pinned.flight + "…", "dim"));
+    box.append(auto);
+  }
   const t = document.getElementById("traffic"); t.replaceChildren();
   const head = $("tr");
   ["Flight", "Type", "Route", "Altitude", "Distance", "", "Heading"].forEach(c => head.append($("th", c)));
   t.append(head);
   for (const r of s.traffic || []) {
-    const tr = $("tr", null, f && r.flight === f.flight ? "on" : "");
-    const name = $("td", r.flight); tags(name, r.tags);
+    const pinnedRow = s.pinned && (s.pinned.hex ? s.pinned.hex === r.hex : s.pinned.callsign === r.callsign);
+    const tr = $("tr", null, "pick" + (f && r.flight === f.flight ? " on" : ""));
+    tr.tabIndex = 0;
+    tr.title = pinnedRow ? "Click to go back to automatic" : "Click to show " + r.flight + " on the Pixoo";
+    tr.onclick = () => pick(pinnedRow ? null : r);
+    tr.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); tr.onclick(); } };
+    const name = $("td", r.flight); tags(name, r.tags); if (pinnedRow) name.append($("span", "PINNED", "tag pin"));
     tr.append(name, $("td", r.aircraft || ""), $("td", (r.origin || "") + "–" + (r.destination || "")),
               $("td", ft(r.altitude)), $("td", km(r.distance_km)), $("td", r.direction),
               $("td", r.heading == null ? "" : arrows[Math.round(r.heading / 45) % 8] + " " + Math.round(r.heading) + "°"));
@@ -437,7 +546,16 @@ function render(s) {
     }
   }
   document.getElementById("updated").textContent = s.age_seconds == null ? "Starting…" :
-    "Updated " + s.age_seconds + " s ago · " + (s.mode || "") + (s.source ? " · data: " + s.source : "");
+    "Updated " + s.age_seconds + " s ago · " + (s.mode || "") + (s.source ? " · data: " + s.source : "") +
+    " · Pixoo Radar " + (s.version || "");
+}
+async function pick(r) {
+  try {
+    await fetch("api/pin", r ? {method: "POST", headers: {"Content-Type": "application/json"},
+                                body: JSON.stringify({hex: r.hex, callsign: r.callsign, flight: r.flight})}
+                             : {method: "DELETE"});
+  } catch (e) {}
+  tick(); setTimeout(tick, 2000); setTimeout(tick, 5000);
 }
 async function tick() {
   try { render(await (await fetch("api/current", {cache: "no-store"})).json()); }
@@ -475,6 +593,8 @@ class GifHost:
         self.check_body = f"pixoo-radar {self.token}".encode()
         self.heartbeat = time.monotonic()   # bumped by the main loop; /health goes stale without it
         self.status, self.status_time = {}, None   # what the web page shows next to the screen
+        self.pin = None                    # {"hex", "callsign", "flight", "since"} picked on the web page
+        self.wake = threading.Event()      # set to cut the main loop's wait short
         host = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -508,6 +628,36 @@ class GifHost:
                     self.wfile.write(data)
                     if path in host.fetched:   # the Pixoo fetching a fresh animation
                         host.fetched[path].set()
+
+            def _json(self, status, body):
+                data = json.dumps(body).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_POST(self):
+                """POST /api/pin {"hex": ..., "callsign": ...}: show this aircraft instead of the automatic pick."""
+                if self.path.split("?")[0] != "/api/pin":
+                    return self.send_error(404)
+                # JSON only: a browser won't send that cross-site without asking first (no CORS here)
+                if not self.headers.get("Content-Type", "").startswith("application/json"):
+                    return self._json(415, {"error": "send JSON"})
+                try:
+                    body = json.loads(self.rfile.read(min(int(self.headers.get("Content-Length") or 0), 4096)))
+                    pin = host.set_pin(body.get("hex"), body.get("callsign"), body.get("flight"))
+                except (ValueError, AttributeError) as exc:
+                    return self._json(400, {"error": str(exc)})
+                self._json(200, {"pinned": pin})
+
+            def do_DELETE(self):
+                """DELETE /api/pin: back to the automatic pick."""
+                if self.path.split("?")[0] != "/api/pin":
+                    return self.send_error(404)
+                host.clear_pin("unpinned on the web page")
+                self._json(200, {"pinned": None})
 
             def do_GET(self):
                 self._serve(True)
@@ -563,7 +713,33 @@ class GifHost:
         age = time.monotonic() - self.heartbeat
         healthy = age < 3 * REFRESH_SECONDS + 600
         return healthy, {"status": "ok" if healthy else "stalled", "last_loop_seconds_ago": round(age),
-                         "showing": self.latest is not None}
+                         "showing": self.latest is not None, "version": __version__}
+
+    def set_pin(self, hex_, callsign, flight=None):
+        hex_ = str(hex_ or "").strip().lower()
+        callsign = str(callsign or "").strip().upper()
+        if hex_ and not re.fullmatch(r"[0-9a-f]{6}", hex_):
+            raise ValueError("hex must be a 6-digit aircraft address")
+        if callsign and not re.fullmatch(r"[A-Z0-9-]{1,10}", callsign):
+            raise ValueError("callsign must be letters and digits")
+        if not (hex_ or callsign):
+            raise ValueError("give the aircraft's hex address or callsign")
+        self.pin = {"hex": hex_, "callsign": callsign, "flight": str(flight or callsign or hex_)[:12],
+                    "since": _iso(time.time())}
+        log.info("Pinned %s from the web page", self.pin["flight"])
+        self.wake.set()
+        return self.pin
+
+    def clear_pin(self, reason):
+        if self.pin is not None:
+            log.info("Back to automatic: %s %s", self.pin["flight"], reason)
+            self.pin = None
+            self.wake.set()
+
+    def wait(self, seconds):
+        """Sleep, unless the web page changes what's pinned."""
+        self.wake.wait(max(0.0, seconds))
+        self.wake.clear()
 
     def set_status(self, **status):
         self.status, self.status_time = status, time.time()
@@ -571,7 +747,7 @@ class GifHost:
     def current(self):
         """Status for the web page: the flight on screen, nearby traffic, and which GIF is current."""
         age = round(time.time() - self.status_time) if self.status_time else None
-        return {**self.status, "screen": self.count, "age_seconds": age}
+        return {**self.status, "screen": self.count, "age_seconds": age, "pinned": self.pin, "version": __version__}
 
     def publish(self, gif):
         """Store a GIF under a fresh name; returns (name, url). Keeps the last few."""
@@ -633,7 +809,7 @@ def arrow(degrees):
     return "↑↗→↘↓↙←↖"[round(degrees / 45) % 8]
 
 
-USER_AGENT = {"User-Agent": "pixoo-radar (+https://github.com/haythamelkhoja/pixoo-radar-enhanced)"}
+USER_AGENT = {"User-Agent": f"pixoo-radar/{__version__} (+https://github.com/haythamelkhoja/pixoo-radar-enhanced)"}
 AIRLINE_CALLSIGN = re.compile(r"^[A-Z]{3}\d[A-Z0-9]{0,4}$")   # e.g. UAE29, BAW135, EZY97ND
 
 
@@ -1029,6 +1205,7 @@ class Nearby:
     callsign: str = ""
     hex: str = ""
     source: str = ""
+    pinned: bool = False                            # picked on the web page rather than chosen automatically
     traffic: list = field(default_factory=list)     # everything else in range, for the web page
 
 
@@ -1072,22 +1249,44 @@ def _traffic_row(a, tags, distance):
     }
 
 
-def fetch_nearest():
-    candidates = _candidates(fetch_traffic())
-    if history:
-        history.observe(candidates)
-    if not candidates:
-        return None
-    # Closest first; with PRIORITIZE_HIGHLIGHTS a military or rare aircraft anywhere in range wins
+def is_pinned(a, pin):
+    """Whether aircraft a is the one picked on the web page (by address, else by callsign)."""
+    if pin.get("hex"):
+        return a.hex == pin["hex"]
+    return bool(pin.get("callsign")) and a.callsign == pin["callsign"]
+
+
+def _pick(candidates):
+    """The automatic choice: closest first; with PRIORITIZE_HIGHLIGHTS a military or rare
+    aircraft anywhere in range wins. Returns (aircraft, tags, distance) or None."""
     ordered = sorted(candidates, key=lambda c: (PRIORITIZE_HIGHLIGHTS and not c[1], c[2]))
     for a, tags, distance in ordered[:MAX_LOOKUPS]:
         SOURCES[a.source].enrich(a)
         tags = tuple(dict.fromkeys(tags + highlights(a)))   # the lookup may reveal a rare type
         # Other sources only learn the destination from the lookup, so check it now
         if not (SKIP_UNKNOWN_DESTINATION and not tags and is_missing(a.destination)):
-            break
-    else:
+            return a, tags, distance
+    return None
+
+
+def fetch_nearest(pin=None):
+    """The flight to show: the pinned one while it's still around (airborne), else the automatic pick."""
+    aircraft = fetch_traffic()
+    candidates = _candidates(aircraft)
+    if history:
+        history.observe(candidates)
+    chosen, pinned = None, False
+    if pin:
+        match = next((a for a in aircraft if is_pinned(a, pin) and (SHOW_GROUND_TRAFFIC or not a.on_ground)), None)
+        if match:
+            SOURCES[match.source].enrich(match)
+            chosen = (match, highlights(match), haversine_km(HOME_LAT, HOME_LON, match.latitude, match.longitude))
+            pinned = True
+    if chosen is None:
+        chosen = _pick(candidates)
+    if chosen is None:
         return None
+    a, tags, distance = chosen
 
     return Nearby(
         flight=str(first(a.flight, a.callsign) or "").upper(),
@@ -1108,6 +1307,7 @@ def fetch_nearest():
         callsign=a.callsign,
         hex=a.hex,
         source=a.source,
+        pinned=pinned,
         traffic=[_traffic_row(*c) for c in candidates[:15]],
     )
 
@@ -1217,8 +1417,13 @@ def _draw_flap_field(img, top, label, old, new, t):
 HIGHLIGHT_PERIOD = 9      # border and badge are on for 6 of every 9 plane steps (divides RADAR_FRAMES)
 
 
-def _draw_highlight(img, tags, step):
-    if not tags or step % HIGHLIGHT_PERIOD >= 6:
+def _draw_highlight(img, tags, step, pinned=False):
+    if not tags:
+        if pinned:   # picked on the web page: a steady white badge
+            fill(img, 0, 0, text_width("PIN", F35) + 3, 7, COLOR_WHITE)
+            draw_text(img, (2, 1), "PIN", F35, "#000000")
+        return
+    if step % HIGHLIGHT_PERIOD >= 6:
         return
     color, badge = (COLOR_MILITARY, "MIL") if "military" in tags else (COLOR_RARE, "RARE")
     ImageDraw.Draw(img).rectangle((0, 0, 63, 63), outline=rgb(color))
@@ -1226,8 +1431,8 @@ def _draw_highlight(img, tags, step):
     draw_text(img, (2, 1), badge, F35, "#000000")
 
 
-def radar_page():
-    n = fetch_nearest()
+def radar_page(pin=None):
+    n = fetch_nearest(pin)
     if n is None:
         raise LookupError("no airborne flights nearby")
 
@@ -1237,7 +1442,7 @@ def radar_page():
     panels = [
         (("FLT", n.flight), ("ALT", _fmt_altitude(n))),
         (("TYPE", n.aircraft), ("REG", n.registration)),
-        (("SPD", _fmt_speed(n)), (compass(n.bearing) if SHOW_DIRECTION else "DIST", _fmt_distance(n))),
+        (("SPD", _fmt_speed(n)), (compass(n.bearing) if SHOW_BEARING else "DIST", _fmt_distance(n))),
     ]
     per_panel = RADAR_FRAMES // len(panels)
     sub = FLAP_SUBFRAMES if SPLIT_FLAP != "off" else 1
@@ -1273,11 +1478,11 @@ def radar_page():
         else:
             _draw_field(img, 33, *upper)
             _draw_field(img, 49, *lower)
-        _draw_highlight(img, n.tags, step)
+        _draw_highlight(img, n.tags, step, n.pinned)
         frames.append(img)
 
     summary = (f"{n.flight} {origin}->{dest} {n.aircraft or ''} {_fmt_altitude(n)} {_fmt_distance(n)} "
-               f"{compass(n.bearing)}" + "".join(f" [{tag.upper()}]" for tag in n.tags))
+               f"{compass(n.bearing)}" + "".join(f" [{tag.upper()}]" for tag in n.tags) + (" [PINNED]" if n.pinned else ""))
     return frames, FRAME_MS // sub, summary, n
 
 
@@ -1287,6 +1492,10 @@ def radar_page():
 
 def _iso(epoch):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+def _epoch(iso):
+    return calendar.timegm(time.strptime(iso, "%Y-%m-%dT%H:%M:%SZ"))
 
 
 class History:
@@ -1319,6 +1528,40 @@ class History:
             with open(self.path, "w", newline="", encoding="utf-8") as fh:
                 csv.writer(fh).writerow(self.FIELDS)
         self.trim()
+        self._resume(time.time())
+
+    def _resume(self, now):
+        """Take back visits written at the last shutdown that may still be going on, so a
+        restart doesn't count the aircraft in range twice."""
+        cutoff = _iso(now - self.GAP)
+        with self.lock:
+            recent = [r for r in self._stored() if (r.get("last_seen") or "") >= cutoff]
+            if not recent:
+                return
+            if self.kind == "sqlite":
+                self.db.execute("DELETE FROM sightings WHERE last_seen >= ?", (cutoff,))
+                self.db.commit()
+            else:
+                self._rewrite_csv([r for r in self._stored() if (r.get("last_seen") or "") < cutoff])
+            for r in recent:
+                key = self._key(r.get("hex") or "", r.get("callsign") or "")
+                if not key:
+                    continue
+                e = {f: (r.get(f) or None) for f in self.FIELDS}
+                lowest = r.get("lowest_ft")
+                e.update(first_seen=_epoch(r["first_seen"]), last_seen=_epoch(r["last_seen"]),
+                         shown=str(r.get("shown")) in ("1", "True"), closest_km=float(r["closest_km"]),
+                         tags={t for t in str(r.get("tags") or "").split(";") if t},
+                         lowest_ft=int(float(lowest)) if lowest not in (None, "") else None)
+                self.active[key] = e
+
+    def _rewrite_csv(self, rows):
+        tmp = self.path + ".tmp"
+        with open(tmp, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=self.FIELDS, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(rows)
+        os.replace(tmp, self.path)
 
     @staticmethod
     def _key(hex_, callsign):
@@ -1398,12 +1641,7 @@ class History:
                 keep = [r for r in rows if (r.get("last_seen") or "") >= cutoff]
                 removed = len(rows) - len(keep)
                 if removed:
-                    tmp = self.path + ".tmp"
-                    with open(tmp, "w", newline="", encoding="utf-8") as fh:
-                        writer = csv.DictWriter(fh, fieldnames=self.FIELDS, extrasaction="ignore")
-                        writer.writeheader()
-                        writer.writerows(keep)
-                    os.replace(tmp, self.path)
+                    self._rewrite_csv(keep)
         if removed:
             log.info("History: removed %s entries older than %s days", removed, self.retention_days)
             self._stats = (0.0, None)
@@ -1510,7 +1748,7 @@ class Mqtt:
     def discovery(self):
         """(topic, config) pairs for Home Assistant MQTT discovery."""
         device = {"identifiers": [self.node], "name": "Pixoo Radar", "manufacturer": "pixoo-radar-enhanced",
-                  "model": "Pixoo Radar"}
+                  "model": "Pixoo Radar", "sw_version": __version__}
         common = {"state_topic": f"{self.topic}/state", "availability_topic": f"{self.topic}/availability",
                   "device": device}
         configs = []
@@ -1584,16 +1822,16 @@ def _loop(pixoo, mqtt):
     # The web server always runs (its root page shows the current screen); the Pixoo
     # only fetches from it when GIF_BASE_URL is set and reachable.
     use_url = bool(GIF_BASE_URL) and "CHANGE-ME" not in GIF_BASE_URL
-    base_url = with_ip(GIF_BASE_URL) if use_url else f"http://localhost:{GIF_PORT}"
-    gif_host = GifHost(base_url, GIF_PORT)
+    base_url = with_ip(GIF_BASE_URL) if use_url else f"http://localhost:{WEB_PORT}"
+    gif_host = GifHost(base_url, WEB_PORT)
     hosted = False
     if use_url:
-        log.info("Serving animations on port %s; the Pixoo fetches them from %s%s", GIF_PORT, base_url,
+        log.info("Serving animations on port %s; the Pixoo fetches them from %s%s", WEB_PORT, base_url,
                  f" ({GIF_BASE_URL})" if base_url != GIF_BASE_URL else "")
         hosted = gif_host.self_check()
     else:
         log.info("GIF_BASE_URL not set: pushing frames (the Pixoo shows Loading.. on each update); "
-                 "current screen on port %s", GIF_PORT)
+                 "current screen on port %s", WEB_PORT)
 
     if 0 <= PIXOO_BRIGHTNESS <= 100:
         try:
@@ -1601,7 +1839,18 @@ def _loop(pixoo, mqtt):
         except Exception as exc:
             log.warning("Could not set brightness: %s", exc)
 
-    on_screen, failures, retry_hosted_at, spotted = None, 0, None, None
+    on_screen, failures, retry_hosted_at, spotted, pin_misses = None, 0, None, None, 0
+    PIN_RELEASE_AFTER = 2   # updates the pinned aircraft may be missing (gone, or landed) before going back to auto
+
+    def pinned_missing(pin):
+        nonlocal pin_misses
+        if pin is None or gif_host.pin is not pin:
+            pin_misses = 0
+            return
+        pin_misses += 1
+        if pin_misses >= PIN_RELEASE_AFTER:
+            gif_host.clear_pin("isn't in the data any more (out of range or landed)")
+            pin_misses = 0
 
     def publish_status(**status):
         if history:
@@ -1622,19 +1871,25 @@ def _loop(pixoo, mqtt):
             if hosted:
                 log.info("Trying hosted GIFs again")
 
+        pin = gif_host.pin
         try:
-            frames, frame_ms, summary, n = radar_page()
+            frames, frame_ms, summary, n = radar_page(pin)
             failures = 0
         except LookupError as exc:  # nothing airborne nearby: keep the last flight on screen
             log.info("%s", exc)
+            pinned_missing(pin)
             publish_status(**{**gif_host.status, "traffic": [], "note": str(exc)})
-            time.sleep(REFRESH_SECONDS)
+            gif_host.wait(REFRESH_SECONDS)
             continue
         except Exception as exc:
             failures += 1
             log.warning("Flight data unavailable (%s)", exc)
-            time.sleep(min(300, REFRESH_SECONDS * failures))
+            gif_host.wait(min(300, REFRESH_SECONDS * failures))
             continue
+        if n.pinned:
+            pin_misses = 0
+        else:
+            pinned_missing(pin)
 
         flight = _flight_status(n)
         publish_status(flight=flight, traffic=n.traffic, mode="hosted GIF" if hosted else "pushed frames",
@@ -1676,7 +1931,7 @@ def _loop(pixoo, mqtt):
                 time.sleep(30)
                 continue
 
-        time.sleep(max(0.0, REFRESH_SECONDS - (time.monotonic() - started)))
+        gif_host.wait(REFRESH_SECONDS - (time.monotonic() - started))
 
 
 def preview(out_dir):
@@ -1695,30 +1950,154 @@ def preview(out_dir):
     print(summary)
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Closest-flight radar for the Divoom Pixoo64")
-    parser.add_argument("--preview", metavar="DIR", help="render the current flight to PNGs in DIR and exit")
-    args = parser.parse_args()
-
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stdout)
-    required = ("HOME_LAT", "HOME_LON") if args.preview else ("PIXOO_HOST", "HOME_LAT", "HOME_LON")
+def _startup_problems(preview=False):
+    """Everything that would stop the app from working, as messages."""
+    required = ("HOME_LAT", "HOME_LON") if preview else ("PIXOO_HOST", "HOME_LAT", "HOME_LON")
     missing = [name for name in required if not os.environ.get(name, "").strip()]
-    if missing:
-        sys.exit(f"Missing required setting(s): {', '.join(missing)}. Set them as environment variables, "
-                 "e.g. PIXOO_HOST=192.168.1.50 HOME_LAT=51.4700 HOME_LON=-0.4543")
-    problems = [f"DATA_SOURCE: unknown source {name!r} (use fr24, adsb or opensky)"
-                for name in DATA_SOURCE if name not in SOURCES]
-    if not DATA_SOURCE:
-        problems.append("DATA_SOURCE is empty (use fr24, adsb or opensky)")
-    if HISTORY not in ("off", "sqlite", "csv"):
-        problems.append(f"HISTORY={HISTORY!r}: use off, sqlite or csv")
-    if MQTT_HOST and not args.preview:
+    problems = [f"Missing required setting(s): {', '.join(missing)}. Set them as environment variables, "
+                "e.g. PIXOO_HOST=192.168.1.50 HOME_LAT=51.4700 HOME_LON=-0.4543"] if missing else []
+    problems += SETTING_PROBLEMS
+    if MQTT_HOST and not preview:
         try:
             import paho.mqtt.client  # noqa: F401
         except ImportError:
             problems.append("MQTT_HOST is set but paho-mqtt isn't installed (pip install -r requirements.txt)")
+    return problems
+
+
+def _check_frame():
+    img = Image.new("RGB", (64, 64))
+    for y, text, color in ((10, "PIXOO", COLOR_WHITE), (20, "RADAR", COLOR_WHITE), (38, "CHECK", COLOR_TEXT),
+                           (48, "OK", COLOR_TEXT)):
+        draw_text(img, ((64 - text_width(text, F57)) // 2, y), text, F57, color)
+    return img
+
+
+def check():
+    """--check: try every part of the setup and print what works. Returns the exit code."""
+    failed = []
+
+    def report(ok, text):
+        if ok is False:
+            failed.append(text)
+        print({True: "✓", False: "✗", None: "-"}[ok], text, flush=True)
+
+    print(f"Pixoo Radar {__version__}\n")
+    problems = _startup_problems()
+    report(not problems, "Settings are valid" if not problems else "Settings:\n    " + "\n    ".join(problems))
+    for old, new in RENAMED_SETTINGS:
+        report(None, f"{old} is now called {new}; the old name still works")
+
+    pixoo = None
+    if PIXOO_HOST:
+        started = time.monotonic()
+        try:
+            pixoo = Pixoo(PIXOO_HOST)
+            pixoo._post("Channel/GetIndex")
+            report(True, f"Pixoo at {PIXOO_HOST} answers ({(time.monotonic() - started) * 1000:.0f} ms)")
+        except Exception as exc:
+            pixoo = None
+            report(False, f"Pixoo at {PIXOO_HOST} doesn't answer: {exc}")
+
+    closest = None
+    for name in [n for n in DATA_SOURCE if n in SOURCES]:
+        try:
+            aircraft = SOURCES[name].fetch()
+            candidates = _candidates(aircraft)
+            report(True, f"{name}: {len(aircraft)} aircraft in the area, {len(candidates)} to choose from "
+                         f"within {RADAR_RADIUS_KM} km")
+            closest = closest or (candidates[0] if candidates else None)
+        except Exception as exc:
+            report(False, f"{name}: {exc}")
+    if closest:
+        a, tags, distance = closest
+        report(None, f"Closest: {first(a.flight, a.callsign)} {first(a.aircraft) or ''} {distance:.1f} km "
+                     f"{compass(bearing_deg(HOME_LAT, HOME_LON, a.latitude, a.longitude))}")
+    if LOOKUP_ADSBDB and any(n in ("adsb", "opensky") for n in DATA_SOURCE):
+        try:
+            status = requests.get("https://api.adsbdb.com/v0/callsign/BAW1", timeout=HTTP_TIMEOUT,
+                                  headers=USER_AGENT).status_code
+            report(status in (200, 404), "adsbdb.com is reachable" if status in (200, 404) else
+                   f"adsbdb.com answered HTTP {status}")
+        except Exception as exc:
+            report(False, f"adsbdb.com: {exc}")
+
+    if GIF_BASE_URL and "CHANGE-ME" not in GIF_BASE_URL:
+        try:
+            host = GifHost(with_ip(GIF_BASE_URL), WEB_PORT)
+        except OSError:
+            report(None, f"Port {WEB_PORT} is in use (Pixoo Radar already running?), so the hosted-GIF test is "
+                         "skipped; its log says whether the Pixoo can fetch")
+        else:
+            try:
+                reachable = host.self_check(wait_seconds=0)
+                report(reachable, f"{GIF_BASE_URL} reaches this app over plain http" if reachable else
+                       f"{GIF_BASE_URL} doesn't reach this app (see the warning above)")
+                if reachable and pixoo:
+                    name, url = host.publish(encode_gif([_check_frame()], 1000))
+                    pixoo.play_gif_url(url)
+                    fetched = host.fetched[name].wait(15)
+                    report(fetched, f"The Pixoo downloaded a test GIF from {url} (it shows CHECK OK)" if fetched else
+                           f"The Pixoo didn't download {url} within 15 s: it can't reach this address (firewall or "
+                           "DNS on its network?). It may be unresponsive for a minute.")
+            finally:
+                host.server.shutdown()
+                host.server.server_close()
+    else:
+        report(None, "GIF_BASE_URL isn't set, so frames are pushed (the Pixoo shows Loading.. on each update)")
+
+    if HISTORY in ("sqlite", "csv"):
+        try:
+            h = History(HISTORY, HISTORY_DIR)
+            h.close()
+            report(True, f"History can be written to {h.path}")
+        except Exception as exc:
+            report(False, f"History can't be written to {HISTORY_DIR}: {exc}")
+
+    if MQTT_HOST:
+        try:
+            import paho.mqtt.client as paho
+            answered, outcome = threading.Event(), {}
+            client = paho.Client(paho.CallbackAPIVersion.VERSION2)
+            if MQTT_USERNAME:
+                client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD or None)
+            if MQTT_TLS:
+                client.tls_set()
+            client.on_connect = lambda c, u, f, rc, p: (outcome.update(rc=rc), answered.set())
+            client.connect(MQTT_HOST, MQTT_PORT, keepalive=10)
+            client.loop_start()
+            answered.wait(10)
+            client.disconnect()
+            client.loop_stop()
+            rc = outcome.get("rc")
+            report(rc is not None and not rc.is_failure,
+                   f"MQTT broker {MQTT_HOST}:{MQTT_PORT} " + ("accepted the connection" if rc is not None and
+                   not rc.is_failure else f"refused the connection: {rc}" if rc else "didn't answer"))
+        except Exception as exc:
+            report(False, f"MQTT broker {MQTT_HOST}:{MQTT_PORT}: {exc}")
+
+    print("\nAll good." if not failed else f"\n{len(failed)} problem(s) found.")
+    return 1 if failed else 0
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Closest-flight radar for the Divoom Pixoo64")
+    parser.add_argument("--preview", metavar="DIR", help="render the current flight to PNGs in DIR and exit")
+    parser.add_argument("--check", action="store_true", help="test the Pixoo, data sources, GIF_BASE_URL, history "
+                        "and MQTT, then exit (briefly shows a test screen on the Pixoo)")
+    parser.add_argument("--version", action="version", version=f"Pixoo Radar {__version__}")
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stdout)
+    if args.check:
+        logging.getLogger().setLevel(logging.WARNING)
+        sys.exit(check())
+    problems = _startup_problems(preview=bool(args.preview))
     if problems:
         sys.exit("\n".join(problems))
+    for old, new in RENAMED_SETTINGS:
+        log.warning("%s has been renamed to %s; please update your settings (the old name still works for now)",
+                    old, new)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))  # PID 1 in Docker ignores SIGTERM otherwise
 
     try:

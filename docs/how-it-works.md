@@ -37,6 +37,13 @@ Pillow, requests, FlightRadarAPI and (for MQTT) paho-mqtt. Tests are in [`tests/
    known destination.
 
 If nothing is airborne nearby, the last flight stays on screen until something shows up.
+
+**A flight picked on the web page** overrides all of this: it's looked up in everything
+the source returned (filters don't apply; you chose it), by its 24-bit address, or by
+callsign if it has none. Picking or un-picking wakes the main loop, so the Pixoo changes
+within a second or two. If the picked aircraft is missing from two updates in a row
+(out of range, or landed unless `SHOW_GROUND_TRAFFIC`), the app goes back to automatic.
+The pick is kept in memory only, so a restart is back to automatic too.
 If every source errors, the app backs off (up to 5 minutes) and retries.
 
 ## History and MQTT
@@ -132,12 +139,14 @@ wears on the Pixoo.
 
 ## 4. The web server
 
-Always running on `GIF_PORT` (default 8765), plain HTTP, no dependencies:
+Always running on `WEB_PORT` (default 8765), plain HTTP, no dependencies:
 
 | Path | What |
 |---|---|
 | `/` | Live page: the current screen, the flight's details and nearby traffic, polling `/api/current` every 5 s |
 | `/api/current` | JSON: the flight on screen, up to 15 nearby aircraft (distance, direction, heading, tags), today's counts, mode, data source, age |
+| `POST /api/pin` | Show this aircraft instead: JSON `{"hex": "406d8e", "callsign": "EZY97ND"}` (either is enough) |
+| `DELETE /api/pin` | Back to the automatic pick |
 | `/api/history?limit=N` | JSON: the N most recent visits (default 100, with `HISTORY` on) |
 | `/latest.gif` | The current animation |
 | `/<token>/<n>.gif` | Hosted GIFs for the Pixoo |
@@ -145,4 +154,6 @@ Always running on `GIF_PORT` (default 8765), plain HTTP, no dependencies:
 | `/health` | JSON health status (200 / 503) |
 
 All responses are `Cache-Control: no-store`. It's meant for your LAN: there's no
-authentication, and the only content is the picture on your Pixoo and public flight data.
+authentication, so anyone who can open the page can also pick the flight on screen.
+`POST /api/pin` only accepts `Content-Type: application/json`, which stops other websites
+from changing it through your browser, and the only content is the picture on your Pixoo and public flight data.

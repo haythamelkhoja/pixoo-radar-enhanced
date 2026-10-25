@@ -94,7 +94,7 @@ def test_highlight_flashes(pr, page):
 def test_direction_label(pr, page, monkeypatch):
     frames, *_ = page()
     with_direction = frames[-1].crop((0, 49, 20, 64)).tobytes()
-    monkeypatch.setattr(pr, "SHOW_DIRECTION", False)
+    monkeypatch.setattr(pr, "SHOW_BEARING", False)
     frames, *_ = page()
     assert frames[-1].crop((0, 49, 20, 64)).tobytes() != with_direction
 
@@ -116,3 +116,19 @@ def test_preview(pr, monkeypatch, tmp_path, capsys):
     pr.preview(str(tmp_path))
     assert sorted(p.name for p in tmp_path.iterdir()) == ["radar.gif", "radar1.png", "radar2.png", "radar3.png"]
     assert "EK29" in capsys.readouterr().out
+
+
+def test_pin_badge(pr, page, monkeypatch):
+    monkeypatch.setattr(pr.SOURCES["adsb"], "enrich", lambda a: None)
+    monkeypatch.setattr(pr, "fetch_traffic", lambda: [make_aircraft(pr)])
+    frames, *_ = pr.radar_page({"hex": "4010ee"})
+    assert all(f.getpixel((0, 0)) == pr.rgb(pr.COLOR_WHITE) for f in frames)   # steady, not flashing
+    frames, *_ = pr.radar_page()
+    assert frames[0].getpixel((0, 0)) != pr.rgb(pr.COLOR_WHITE)
+    *_, summary, n = pr.radar_page({"hex": "4010ee"})
+    assert summary.endswith("[PINNED]") and n.pinned
+
+
+def test_check_frame(pr):
+    img = pr._check_frame()
+    assert img.size == (64, 64) and img.getbbox() is not None

@@ -50,6 +50,7 @@ mkdir -p "$APP_DIR"
 if [ -n "$src_dir" ] && [ -f "$src_dir/src/pixoo_radar.py" ]; then
     say "Installing from $src_dir"
     install -m 644 "$src_dir/src/pixoo_radar.py" "$src_dir/requirements.txt" "$APP_DIR/"
+    git -C "$src_dir" describe --tags --always --dirty 2>/dev/null >"$APP_DIR/VERSION" || echo local >"$APP_DIR/VERSION"
 else
     version="${PIXOO_RADAR_VERSION:-}"
     if [ -z "$version" ]; then
@@ -62,6 +63,7 @@ else
         curl -fsSL "https://raw.githubusercontent.com/$REPO/$version/$file" -o "$APP_DIR/${file##*/}" \
             || die "couldn't download $file ($version)"
     done
+    echo "$version" >"$APP_DIR/VERSION"
 fi
 
 say "Installing Python packages"
@@ -100,13 +102,13 @@ GIF_BASE_URL=${gif_base_url}
 #PRIORITIZE_HIGHLIGHTS=true
 #RARE_REGISTRATIONS=
 #FRAME_MS=300
-#SHOW_DIRECTION=true
+#SHOW_BEARING=true
 #SPLIT_FLAP=off
 #PIXOO_BRIGHTNESS=-1
 #LOGO_SOURCES=fr24,avcodes
 #COLOR_TEXT="#FFFF00"
 #COLOR_BOX="#2B2B2B"
-#GIF_PORT=8765
+#WEB_PORT=8765
 #SHOW_HEADING=true
 # Data: fr24, adsb (adsb.lol or your receiver's .../data/aircraft.json), opensky; several = fallbacks
 #DATA_SOURCE=fr24
@@ -166,3 +168,4 @@ else
     say "Running. Logs: journalctl -u $SERVICE -f"
     if [ -n "$my_ip" ]; then say "Current screen: http://$my_ip:8765"; fi
 fi
+say "Test the setup any time: sudo systemd-run --pty --quiet -p EnvironmentFile=$ENV_FILE -p User=$USER_NAME $APP_DIR/venv/bin/python $APP_DIR/pixoo_radar.py --check"
