@@ -4,9 +4,10 @@ Pixoo Radar for the Divoom Pixoo64
 ==================================
 
 Shows the airborne flight closest to home: airline logo, route with an
-animated plane, and a split-flap panel cycling flight number, altitude,
-aircraft type, registration, speed and distance. Checks for a new closest
-flight every REFRESH_SECONDS.
+animated plane, and a panel cycling flight number, altitude, aircraft type,
+registration, speed, distance and direction (optionally on split-flap tiles).
+Military and rare aircraft are highlighted and shown first. Checks for a new
+closest flight every REFRESH_SECONDS; the built-in web server shows it live.
 
 With GIF_BASE_URL set, each animation is served as a GIF from a small built-in
 web server and the Pixoo fetches and plays it itself (Device/PlayTFGif), so the
@@ -41,7 +42,7 @@ import socket
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
@@ -78,9 +79,33 @@ HOME_LAT = _setting("HOME_LAT", 0.0)                       # your location (requ
 HOME_LON = _setting("HOME_LON", 0.0)
 RADAR_RADIUS_KM = _setting("RADAR_RADIUS_KM", 100)
 SHOW_GROUND_TRAFFIC = _setting("SHOW_GROUND_TRAFFIC", False)  # include parked/taxiing aircraft
+IGNORE_HELICOPTERS = _setting("IGNORE_HELICOPTERS", True)
+SKIP_UNKNOWN_DESTINATION = _setting("SKIP_UNKNOWN_DESTINATION", False)  # e.g. positioning/training flights
+
+# Military and rare aircraft get a flashing border and badge, and (with PRIORITIZE_HIGHLIGHTS)
+# are shown ahead of closer ordinary flights. Military flights rarely have a flight number,
+# so they're only shown at all with HIGHLIGHT_MILITARY on.
+HIGHLIGHT_MILITARY = _setting("HIGHLIGHT_MILITARY", True)
+HIGHLIGHT_RARE = _setting("HIGHLIGHT_RARE", True)
+PRIORITIZE_HIGHLIGHTS = _setting("PRIORITIZE_HIGHLIGHTS", True)
+RARE_TYPES = _setting("RARE_TYPES", (                       # ICAO type designators
+    "a124", "a225", "an22", "a3st", "a337", "blcf", "b741", "b742", "b743", "b74s", "b744", "b748",
+    "md11", "dc10", "l101", "il76", "il96", "il62", "a342", "a343", "a345", "a346", "conc", "dc3", "dc6",
+))
+RARE_REGISTRATIONS = _setting("RARE_REGISTRATIONS", ())     # e.g. special liveries: g-xlea,a6-eeu
+MILITARY_CALLSIGNS = _setting("MILITARY_CALLSIGNS", (       # callsign prefixes / operator ICAO codes
+    "rch", "cnv", "pat", "duke", "rrr", "cfc", "gaf", "ctm", "baf", "naf", "iam", "ame", "haf",
+    "plf", "svf", "asy", "kiw", "nato",
+))
+COLOR_MILITARY = _setting("COLOR_MILITARY", "#FF3030")
+COLOR_RARE = _setting("COLOR_RARE", "#00C8FF")
 
 REFRESH_SECONDS = _setting("REFRESH_SECONDS", 60)          # how often to look for the closest flight
 FRAME_MS = _setting("FRAME_MS", 300)                         # animation speed
+SHOW_DIRECTION = _setting("SHOW_DIRECTION", True)            # compass point of the plane in place of "DIST"
+# Flight values on flipping departures-board tiles: off, all (every character) or digits
+SPLIT_FLAP = {"1": "all", "true": "all", "yes": "all", "on": "all", "all": "all", "digits": "digits"}.get(
+    _setting("SPLIT_FLAP", "off").lower(), "off")
 
 LOGO_SOURCES = _setting("LOGO_SOURCES", ("fr24", "avcodes"))  # tried in order
 
@@ -256,11 +281,79 @@ def encode_gif(frames, frame_ms):
 
 
 INDEX_HTML = """<!doctype html><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="30">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Pixoo Radar</title>
-<style>html,body{margin:0;height:100%;background:#000;display:grid;place-items:center}
-img{width:min(90vw,90vh);image-rendering:pixelated}</style>
-<img src="latest.gif" alt="What the Pixoo is showing">
+<style>
+:root{color-scheme:dark;--bg:#0b0b0c;--card:#161618;--line:#2a2a2e;--text:#ececec;--dim:#8a8a90;
+--accent:#ffd60a;--mil:#ff4b4b;--rare:#2ec8ff}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 system-ui,-apple-system,sans-serif;
+padding:16px;display:flex;justify-content:center}
+main{width:100%;max-width:980px;display:grid;gap:16px;grid-template-columns:minmax(0,1fr)}
+@media(min-width:760px){main{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.wide{grid-column:1/-1}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
+#screen{display:block;width:100%;aspect-ratio:1;image-rendering:pixelated;background:#000;border-radius:8px}
+h1{margin:0;font-size:28px;letter-spacing:.5px}
+.airline{color:var(--dim);margin-bottom:12px}
+.route{font-size:22px;font-weight:600;color:var(--accent);margin:8px 0 14px}
+dl{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;margin:0}
+dt{color:var(--dim)}dd{margin:0;font-variant-numeric:tabular-nums}
+.tag{display:inline-block;font-size:12px;font-weight:700;padding:2px 8px;border-radius:99px;
+margin-left:8px;vertical-align:middle;color:#000}
+.tag.military{background:var(--mil)}.tag.rare{background:var(--rare)}
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+th{color:var(--dim);font-weight:500}tr.on td{color:var(--accent)}
+.scroll{overflow-x:auto}.dim{color:var(--dim);font-size:13px}
+</style>
+<main>
+  <div class="card"><img id="screen" src="latest.gif" alt="What the Pixoo is showing"></div>
+  <div class="card" id="flight"><p class="dim">Waiting for the first flight…</p></div>
+  <div class="card wide"><div class="dim" style="margin-bottom:8px">Nearby traffic</div>
+    <div class="scroll"><table id="traffic"></table></div></div>
+  <p class="dim wide" id="updated"></p>
+</main>
+<script>
+const $ = (tag, text, cls) => { const e = document.createElement(tag);
+  if (text != null) e.textContent = text; if (cls) e.className = cls; return e; };
+const km = d => d == null ? "" : (d < 10 ? d.toFixed(1) : Math.round(d)) + " km";
+const ft = a => a == null ? "" : a <= 0 ? "ground" : a.toLocaleString() + " ft";
+const tags = (el, list) => (list || []).forEach(t => el.append($("span", t === "military" ? "MIL" : "RARE", "tag " + t)));
+let shown = null;
+function render(s) {
+  if (s.screen !== shown) { shown = s.screen; document.getElementById("screen").src = "latest.gif?" + s.screen; }
+  const box = document.getElementById("flight"), f = s.flight;
+  if (f) {
+    box.replaceChildren();
+    const h = $("h1", f.flight || "?"); tags(h, f.tags); box.append(h);
+    box.append($("div", f.airline || "", "airline"));
+    box.append($("div", (f.origin || "---") + " → " + (f.destination || "---"), "route"));
+    const dl = $("dl");
+    for (const [k, v] of [["Altitude", f.altitude_text], ["Speed", f.speed ? f.speed + " kt" : ""],
+                          ["Distance", km(f.distance_km) + " " + f.direction], ["Aircraft", f.aircraft],
+                          ["Registration", f.registration]]) { dl.append($("dt", k), $("dd", v || "—")); }
+    box.append(dl);
+  }
+  const t = document.getElementById("traffic"); t.replaceChildren();
+  const head = $("tr"); ["Flight", "Type", "Route", "Altitude", "Distance", ""].forEach(c => head.append($("th", c)));
+  t.append(head);
+  for (const r of s.traffic || []) {
+    const tr = $("tr", null, f && r.flight === f.flight ? "on" : "");
+    const name = $("td", r.flight); tags(name, r.tags);
+    tr.append(name, $("td", r.aircraft || ""), $("td", (r.origin || "") + "–" + (r.destination || "")),
+              $("td", ft(r.altitude)), $("td", km(r.distance_km)), $("td", r.direction));
+    t.append(tr);
+  }
+  if (!(s.traffic || []).length) { const tr = $("tr"); tr.append($("td", s.note || "No traffic yet")); t.append(tr); }
+  document.getElementById("updated").textContent = s.age_seconds == null ? "Starting…" :
+    "Updated " + s.age_seconds + " s ago · " + (s.mode || "");
+}
+async function tick() {
+  try { render(await (await fetch("api/current", {cache: "no-store"})).json()); }
+  catch (e) { document.getElementById("updated").textContent = "Can't reach Pixoo Radar, retrying…"; }
+}
+tick(); setInterval(tick, 5000);
+</script>
 """
 
 
@@ -290,6 +383,7 @@ class GifHost:
         self.files, self.fetched, self.count, self.latest = {}, {}, 0, None
         self.check_body = f"pixoo-radar {self.token}".encode()
         self.heartbeat = time.monotonic()   # bumped by the main loop; /health goes stale without it
+        self.status, self.status_time = {}, None   # what the web page shows next to the screen
         host = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -299,6 +393,8 @@ class GifHost:
                     data, ctype = INDEX_HTML.encode(), "text/html; charset=utf-8"
                 elif path == f"{host.token}/check":
                     data, ctype = host.check_body, "text/plain"
+                elif path == "api/current":
+                    data, ctype = json.dumps(host.current()).encode(), "application/json"
                 elif path == "health":
                     healthy, body = host.health()
                     data, ctype, status = json.dumps(body).encode(), "application/json", 200 if healthy else 503
@@ -373,6 +469,14 @@ class GifHost:
         return healthy, {"status": "ok" if healthy else "stalled", "last_loop_seconds_ago": round(age),
                          "showing": self.latest is not None}
 
+    def set_status(self, **status):
+        self.status, self.status_time = status, time.time()
+
+    def current(self):
+        """Status for the web page: the flight on screen, nearby traffic, and which GIF is current."""
+        age = round(time.time() - self.status_time) if self.status_time else None
+        return {**self.status, "screen": self.count, "age_seconds": age}
+
     def publish(self, gif):
         """Store a GIF under a fresh name; returns (name, url). Keeps the last few."""
         self.count += 1
@@ -414,6 +518,57 @@ def haversine_km(lat1, lon1, lat2, lon2):
     lat1, lon1, lat2, lon2 = map(math.radians, (lat1, lon1, lat2, lon2))
     a = math.sin((lat2 - lat1) / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin((lon2 - lon1) / 2) ** 2
     return 2 * 6371 * math.asin(math.sqrt(a))
+
+
+def bearing_deg(lat1, lon1, lat2, lon2):
+    """Initial great-circle bearing from point 1 to point 2, 0-360 degrees from north."""
+    lat1, lon1, lat2, lon2 = map(math.radians, (lat1, lon1, lat2, lon2))
+    x = math.sin(lon2 - lon1) * math.cos(lat2)
+    y = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(lon2 - lon1)
+    return math.degrees(math.atan2(x, y)) % 360
+
+
+def compass(degrees):
+    return ("N", "NE", "E", "SE", "S", "SW", "W", "NW")[round(degrees / 45) % 8]
+
+
+# Best-effort classification from the live feed (ICAO type designators, address blocks)
+HELICOPTER_TYPES = frozenset("""
+    R22 R44 R66 B06 B06T B407 B412 B429 B430 B505 B212 B222 B230 EC20 EC25 EC30 EC35 EC45 EC55
+    EC75 H160 AS32 AS50 AS55 AS65 AS3B A109 A119 A139 A169 A189 S76 S92 S61 H47 H60 UH1 MI8 MI24
+    MI26 KA32 B47G H269 H500 EXPL NH90 PUMA LYNX GAZL ALO3 EH10 V22
+""".split())
+MILITARY_TYPES = frozenset("""
+    C17 C130 C30J C5M K35R R135 E3TF E3CF E6 P8 P3 A400 B52 B1 F16 F15 F18H F18S F35 EUFI RFAL
+    TOR GRIF HAWK M346 A10 V22 H60 H47 NH90 U2 C2 Y20
+""".split())
+MILITARY_HEX = ((0xAE0000, 0xAFFFFF), (0x43C000, 0x43CFFF))   # US and UK military 24-bit addresses
+
+
+def is_helicopter(f):
+    return str(f.aircraft_code or "").upper() in HELICOPTER_TYPES
+
+
+def is_military(f):
+    try:
+        address = int(str(f.icao_24bit), 16)
+    except ValueError:
+        address = None
+    if address is not None and any(lo <= address <= hi for lo, hi in MILITARY_HEX):
+        return True
+    callsign, operator = str(f.callsign or "").lower(), str(f.airline_icao or "").lower()
+    return (str(f.aircraft_code or "").upper() in MILITARY_TYPES or operator in MILITARY_CALLSIGNS
+            or any(callsign.startswith(prefix) for prefix in MILITARY_CALLSIGNS))
+
+
+def is_rare(f):
+    return str(f.aircraft_code or "").lower() in RARE_TYPES or str(f.registration or "").lower() in RARE_REGISTRATIONS
+
+
+def highlights(f):
+    """("military",), ("rare",), both or neither, as far as the highlight settings allow."""
+    return tuple(tag for tag, on, test in (("military", HIGHLIGHT_MILITARY, is_military), ("rare", HIGHLIGHT_RARE, is_rare))
+                 if on and test(f))
 
 
 # =============================================================================
@@ -519,6 +674,9 @@ class Nearby:
     speed: int
     vspeed: int
     distance_km: float
+    bearing: float = 0.0
+    tags: tuple = ()                                # "military" and/or "rare"
+    traffic: list = field(default_factory=list)     # everything else in range, for the web page
 
 
 def _on_ground(f):
@@ -527,17 +685,42 @@ def _on_ground(f):
     return number(f.altitude) in (0, None) and number(f.ground_speed) in (0, None)
 
 
-def fetch_nearest():
+def _candidates():
+    """(flight, tags, distance) for everything worth showing in range, closest first."""
     bounds = fr24.get_bounds_by_point(HOME_LAT, HOME_LON, RADAR_RADIUS_KM * 1000)
-    candidates = [
-        f for f in (fr24.get_flights(bounds=bounds) or [])
-        if not is_missing(f.airline_iata)                       # has a flight number
-        and number(f.latitude) is not None and number(f.longitude) is not None
-        and (SHOW_GROUND_TRAFFIC or not _on_ground(f))
-    ]
+    found = []
+    for f in fr24.get_flights(bounds=bounds) or []:
+        if number(f.latitude) is None or number(f.longitude) is None:
+            continue
+        if (not SHOW_GROUND_TRAFFIC and _on_ground(f)) or (IGNORE_HELICOPTERS and is_helicopter(f)):
+            continue
+        tags = highlights(f)
+        if not tags:   # ordinary traffic: airline flights only
+            if is_missing(f.airline_iata) or (SKIP_UNKNOWN_DESTINATION and is_missing(f.destination_airport_iata)):
+                continue
+        found.append((f, tags, haversine_km(HOME_LAT, HOME_LON, f.latitude, f.longitude)))
+    return sorted(found, key=lambda c: c[2])
+
+
+def _traffic_row(f, tags, distance):
+    return {
+        "flight": str(first(f.number, f.callsign) or "").upper(),
+        "aircraft": first(f.aircraft_code),
+        "origin": first(f.origin_airport_iata),
+        "destination": first(f.destination_airport_iata),
+        "altitude": number(f.altitude),
+        "distance_km": round(distance, 1),
+        "direction": compass(bearing_deg(HOME_LAT, HOME_LON, f.latitude, f.longitude)),
+        "tags": list(tags),
+    }
+
+
+def fetch_nearest():
+    candidates = _candidates()
     if not candidates:
         return None
-    f = min(candidates, key=lambda c: haversine_km(HOME_LAT, HOME_LON, c.latitude, c.longitude))
+    # Closest first; with PRIORITIZE_HIGHLIGHTS a military or rare aircraft anywhere in range wins
+    f, tags, distance = min(candidates, key=lambda c: (PRIORITIZE_HIGHLIGHTS and not c[1], c[2]))
 
     try:
         details = fr24.get_flight_details(f) or {}
@@ -560,7 +743,10 @@ def fetch_nearest():
         altitude=number(f.altitude),
         speed=number(f.ground_speed),
         vspeed=number(f.vertical_speed),
-        distance_km=haversine_km(HOME_LAT, HOME_LON, f.latitude, f.longitude),
+        distance_km=distance,
+        bearing=bearing_deg(HOME_LAT, HOME_LON, f.latitude, f.longitude),
+        tags=tags,
+        traffic=[_traffic_row(*c) for c in candidates[:15]],
     )
 
 
@@ -606,6 +792,76 @@ def _draw_field(img, top, label, value):
     draw_text(img, (62 - text_width(value, F57), top + 4), value, F57, COLOR_TEXT)
 
 
+# Split-flap values: a fixed board of character tiles. Each time the info panel turns
+# to its next page, the tiles that change flip through the drum, left to right.
+FLAP_SLOTS = 7            # tiles per value, right-aligned like the plain values
+FLAP_DRUM = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-./+:?▲▼"
+FLAP_STEPS = 3            # drum positions shown per flip, the last one being the new character
+FLAP_SUBFRAMES = 2        # frames per plane step, so flips run at FRAME_MS / 2
+COLOR_TILE = "#151515"
+COLOR_HINGE = "#000000"
+
+
+def _flap_text(value):
+    return str(first(value) or "---").upper()[:FLAP_SLOTS].rjust(FLAP_SLOTS)
+
+
+def _flap_sequence(old, new):
+    """Drum positions a tile shows on its way from old to new (empty if unchanged)."""
+    if old == new:
+        return []
+    a, b = FLAP_DRUM.find(old), FLAP_DRUM.find(new)
+    if a < 0 or b < 0:
+        return [new]
+    passed = [FLAP_DRUM[(a + k) % len(FLAP_DRUM)] for k in range(1, (b - a) % len(FLAP_DRUM) + 1)]
+    return passed[-FLAP_STEPS:]
+
+
+def _draw_glyph_rows(img, x, y, char, rows):
+    """Part of a 5x7 glyph, centred in a 5-pixel tile."""
+    glyph = F57.get(char, F57[" "])
+    x += (5 - len(glyph[0])) // 2
+    px, col = img.load(), rgb(COLOR_TEXT)
+    for dy in rows:
+        for dx, bit in enumerate(glyph[dy]):
+            if bit == "#":
+                px[x + dx, y + dy] = col
+
+
+def _draw_flap_field(img, top, label, old, new, t):
+    """Like _draw_field, with each value character on a tile that flips from old to new.
+    t counts frames since the page turned."""
+    draw_text(img, (2, top + 5), label, F35, COLOR_LABEL)
+    old, new = _flap_text(old), _flap_text(new)
+    y, delay = top + 4, 0
+    for k in range(FLAP_SLOTS):
+        x = 63 - (FLAP_SLOTS - k) * 6
+        fill(img, x, y - 1, 5, 9, COLOR_TILE)
+        flips = _flap_sequence(old[k], new[k])
+        if SPLIT_FLAP == "digits" and not (old[k].isdigit() or new[k].isdigit()):
+            flips = []                                # letters just change
+        step = t - delay                              # changing tiles start one frame apart
+        delay += bool(flips)
+        if step < 0 or step >= len(flips):
+            _draw_glyph_rows(img, x, y, old[k] if step < 0 else new[k], range(7))
+        else:                                         # mid-flip: next top half over previous bottom half
+            _draw_glyph_rows(img, x, y, flips[step], range(3))
+            _draw_glyph_rows(img, x, y, flips[step - 1] if step else old[k], range(4, 7))
+            fill(img, x, y + 3, 5, 1, COLOR_HINGE)
+
+
+HIGHLIGHT_PERIOD = 9      # border and badge are on for 6 of every 9 plane steps (divides RADAR_FRAMES)
+
+
+def _draw_highlight(img, tags, step):
+    if not tags or step % HIGHLIGHT_PERIOD >= 6:
+        return
+    color, badge = (COLOR_MILITARY, "MIL") if "military" in tags else (COLOR_RARE, "RARE")
+    ImageDraw.Draw(img).rectangle((0, 0, 63, 63), outline=rgb(color))
+    fill(img, 0, 0, text_width(badge, F35) + 3, 7, color)
+    draw_text(img, (2, 1), badge, F35, "#000000")
+
+
 def radar_page():
     n = fetch_nearest()
     if n is None:
@@ -617,12 +873,14 @@ def radar_page():
     panels = [
         (("FLT", n.flight), ("ALT", _fmt_altitude(n))),
         (("TYPE", n.aircraft), ("REG", n.registration)),
-        (("SPD", _fmt_speed(n)), ("DIST", _fmt_distance(n))),
+        (("SPD", _fmt_speed(n)), (compass(n.bearing) if SHOW_DIRECTION else "DIST", _fmt_distance(n))),
     ]
     per_panel = RADAR_FRAMES // len(panels)
+    sub = FLAP_SUBFRAMES if SPLIT_FLAP != "off" else 1
 
     frames = []
-    for i in range(RADAR_FRAMES):
+    for i in range(RADAR_FRAMES * sub):
+        step = i // sub
         img = Image.new("RGB", (64, 64))
         if logo is not None:
             img.paste(logo, (0, 0))
@@ -636,18 +894,27 @@ def radar_page():
         draw_text(img, (62 - text_width(dest, F57), 23), dest, F57, COLOR_TEXT)
         for x in range(ROUTE_START, ROUTE_END, 3):
             fill(img, x, 26, 2, 1, COLOR_ROUTE)
-        _draw_plane(img, ROUTE_START - PLANE_W + i, 24)
+        _draw_plane(img, ROUTE_START - PLANE_W + step, 24)
 
         dashed_line(img, 32)
         fill(img, 0, 33, 64, 31, COLOR_BOX)
         dashed_line(img, 48)
-        upper, lower = panels[min(i // per_panel, len(panels) - 1)]
-        _draw_field(img, 33, *upper)
-        _draw_field(img, 49, *lower)
+        page = min(step // per_panel, len(panels) - 1)
+        upper, lower = panels[page]
+        if SPLIT_FLAP != "off":
+            t = i - page * per_panel * sub
+            previous_upper, previous_lower = panels[page - 1]   # page 0 flips from the last page
+            _draw_flap_field(img, 33, upper[0], previous_upper[1], upper[1], t)
+            _draw_flap_field(img, 49, lower[0], previous_lower[1], lower[1], t - 1)
+        else:
+            _draw_field(img, 33, *upper)
+            _draw_field(img, 49, *lower)
+        _draw_highlight(img, n.tags, step)
         frames.append(img)
 
-    summary = f"{n.flight} {origin}->{dest} {n.aircraft or ''} {_fmt_altitude(n)} {_fmt_distance(n)}"
-    return frames, FRAME_MS, summary
+    summary = (f"{n.flight} {origin}->{dest} {n.aircraft or ''} {_fmt_altitude(n)} {_fmt_distance(n)} "
+               f"{compass(n.bearing)}" + "".join(f" [{tag.upper()}]" for tag in n.tags))
+    return frames, FRAME_MS // sub, summary, n
 
 
 # =============================================================================
@@ -692,10 +959,11 @@ def run():
                 log.info("Trying hosted GIFs again")
 
         try:
-            frames, frame_ms, summary = radar_page()
+            frames, frame_ms, summary, n = radar_page()
             failures = 0
         except LookupError as exc:  # nothing airborne nearby: keep the last flight on screen
             log.info("%s", exc)
+            gif_host.set_status(**{**gif_host.status, "traffic": [], "note": str(exc)})
             time.sleep(REFRESH_SECONDS)
             continue
         except Exception as exc:
@@ -703,6 +971,10 @@ def run():
             log.warning("Flight data unavailable (%s)", exc)
             time.sleep(min(300, REFRESH_SECONDS * failures))
             continue
+
+        flight = {k: v for k, v in asdict(n).items() if k != "traffic"}
+        gif_host.set_status(flight={**flight, "direction": compass(n.bearing), "altitude_text": _fmt_altitude(n)},
+                            traffic=n.traffic, mode="hosted GIF" if hosted else "pushed frames")
 
         # Re-uploading identical content only wears on the Pixoo
         signature = hashlib.sha1(b"".join(f.tobytes() for f in frames) + str(frame_ms).encode()).digest()
@@ -740,14 +1012,15 @@ def preview(out_dir):
     """Render the current flight to PNG files instead of sending it to the Pixoo."""
     os.makedirs(out_dir, exist_ok=True)
     try:
-        frames, _, summary = radar_page()
+        frames, frame_ms, summary, _ = radar_page()
     except Exception as exc:
         print(f"Nothing to show: {exc}")
         return
-    for k, frame in enumerate(frames[::RADAR_FRAMES // 3][:3]):  # one shot per info panel
+    per_panel = len(frames) // 3
+    for k, frame in enumerate(frames[per_panel - 1::per_panel][:3]):  # one shot per info panel, settled
         frame.resize((512, 512), Image.Resampling.NEAREST).save(os.path.join(out_dir, f"radar{k + 1}.png"))
     with open(os.path.join(out_dir, "radar.gif"), "wb") as fh:
-        fh.write(encode_gif(frames, FRAME_MS))  # exactly what the Pixoo would play
+        fh.write(encode_gif(frames, frame_ms))  # exactly what the Pixoo would play
     print(summary)
 
 

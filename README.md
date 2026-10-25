@@ -23,8 +23,15 @@ registration, speed and distance.
   Without it, frames are pushed over the Pixoo's API (works anywhere, shows "Loading..").
 - **Airline logos** fitted to the 64×20 strip: backgrounds keyed out, thin strokes
   firmed up, dark logos lifted so they're visible on black.
-- **Climb/descent arrows**, flight levels above 10,000 ft, km distance.
-- **Browser view**: open `http://<host>:8765` to see exactly what the Pixoo is showing.
+- **Climb/descent arrows**, flight levels above 10,000 ft, km distance and the compass
+  direction to look in (`SW  26KM`).
+- **Military and rare aircraft** get a flashing border and a MIL/RARE badge, and are shown
+  ahead of closer ordinary flights. You can edit the list of rare aircraft types.
+- **Split-flap option**: the flight values on departures-board tiles that flip, for every
+  character or digits only.
+- **Helicopters ignored** by default, optionally anything without a known destination.
+- **Live web page**: open `http://<host>:8765` for the current screen, the flight's
+  details and a table of nearby traffic, updating every few seconds.
 - **Self-diagnosing**: checks that the Pixoo can reach it, falls back to pushing frames
   if not, and says why in the logs.
 - **`/health` endpoint** and a Docker `HEALTHCHECK`.
@@ -71,11 +78,23 @@ Everything is an environment variable. Only the first three are required.
 | `RADAR_RADIUS_KM` | `100` | Search radius around home, whole kilometres. |
 | `REFRESH_SECONDS` | `60` | How often to look for the closest flight. |
 | `SHOW_GROUND_TRAFFIC` | `false` | `true` to include parked and taxiing aircraft. |
+| `IGNORE_HELICOPTERS` | `true` | Skip helicopters (their routes are almost never known). |
+| `SKIP_UNKNOWN_DESTINATION` | `false` | `true` skips flights with no known destination. |
+| `HIGHLIGHT_MILITARY` | `true` | Show military aircraft (they usually have no flight number) with a red border and MIL badge. |
+| `HIGHLIGHT_RARE` | `true` | Blue border and RARE badge for types in `RARE_TYPES` and registrations in `RARE_REGISTRATIONS`. |
+| `PRIORITIZE_HIGHLIGHTS` | `true` | A highlighted aircraft anywhere in range is shown before closer ordinary flights. |
+| `RARE_TYPES` | 747s, A340s, MD-11, An-124, Beluga… | Comma-separated ICAO type codes that count as rare. Replaces the default list. |
+| `RARE_REGISTRATIONS` | *(empty)* | Comma-separated registrations that count as rare, e.g. special liveries. |
+| `MILITARY_CALLSIGNS` | `rch,cnv,pat,…` | Callsign prefixes / operator codes treated as military (on top of US/UK military addresses and military types). |
 | `FRAME_MS` | `300` | Animation frame time in milliseconds. |
+| `SHOW_DIRECTION` | `true` | Show the compass direction to the plane (`NE`) in place of the "DIST" label. |
+| `SPLIT_FLAP` | `off` | `all` puts the flight values on departures-board tiles that flip to each new value; `digits` flips only tiles showing a number. |
 | `PIXOO_BRIGHTNESS` | `-1` | Set brightness `0`–`100` at start-up; `-1` leaves it alone. |
 | `LOGO_SOURCES` | `fr24,avcodes` | Where to fetch airline logos, tried in order. `none` shows the airline name instead. |
 | `COLOR_TEXT` | `#FFFF00` | Colour of flight details. |
 | `COLOR_BOX` | `#2B2B2B` | Colour of the panels behind the text. |
+| `COLOR_MILITARY` | `#FF3030` | Border and badge colour for military aircraft. |
+| `COLOR_RARE` | `#00C8FF` | Border and badge colour for rare aircraft. |
 | `TZ` | `UTC` | Timezone for log timestamps (Docker). |
 
 More detail, examples and edge cases: [docs/configuration.md](docs/configuration.md).

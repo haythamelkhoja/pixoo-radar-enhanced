@@ -11,17 +11,22 @@ Pillow, requests and FlightRadarAPI.
  ┌──────────────┐   airline logo        │                  │                           │         │
  │ logo sources │ ────────────────────▶ │  render 27 frames│ ◀──── GET /<token>/N.gif ─│         │
  └──────────────┘   (cached in memory)  │  encode GIF      │                           └─────────┘
-                                        │  web server :8765│ ◀──── browser: /  /health
+                                        │  web server :8765│ ◀──── browser: /  /api  
                                         └──────────────────┘
 ```
 
 ## 1. Find the closest flight
 
 1. Ask FlightRadar24 for all flights in a box `RADAR_RADIUS_KM` around home.
-2. Keep flights that have an airline flight number and a position, and (unless
-   `SHOW_GROUND_TRAFFIC`) that are airborne.
-3. Pick the one with the smallest great-circle (haversine) distance from home.
-4. Fetch its details (airline name, route, aircraft model, registration). If that call
+2. Drop aircraft without a position, on the ground (unless `SHOW_GROUND_TRAFFIC`), and
+   helicopters (unless `IGNORE_HELICOPTERS=false`).
+3. Tag military and rare aircraft (see [configuration](configuration.md#military-and-rare-aircraft)).
+   Untagged aircraft also need an airline flight number (and, with
+   `SKIP_UNKNOWN_DESTINATION`, a known destination).
+4. Pick the one with the smallest great-circle (haversine) distance from home. With
+   `PRIORITIZE_HIGHLIGHTS`, the closest *tagged* aircraft wins over any untagged one.
+   The bearing from home gives the compass direction.
+5. Fetch its details (airline name, route, aircraft model, registration). If that call
    fails, fall back to what the live feed already had.
 
 If nothing is airborne nearby, the last flight stays on screen until something shows up.
@@ -35,7 +40,15 @@ The 64×64 screen is drawn pixel by pixel with two built-in bitmap fonts (5×7 a
 |---|---|
 | 0–19 | Airline logo, or the airline name if there's no logo |
 | 21–31 | Origin → destination, with a plane moving along a dotted route |
-| 33–63 | Two fields at a time: FLT/ALT, then TYPE/REG, then SPD/DIST |
+| 33–63 | Two fields at a time: FLT/ALT, then TYPE/REG, then SPD and distance (labelled with the compass direction) |
+
+Military and rare aircraft get a 1-pixel border and a `MIL`/`RARE` badge in the top-left
+corner, on for 6 of every 9 plane steps so they flash.
+
+With `SPLIT_FLAP`, each value sits on 7 dark tiles. When the panel turns a page, every
+tile that changes shows up to three drum positions (the next character's top half over
+the previous one's bottom half, split by a dark hinge line) before settling. Tiles start
+one frame apart, left to right. The animation then has 54 frames at `FRAME_MS / 2`.
 
 One animation is 27 frames: one full pass of the plane across the route, during which
 the info panel steps through its three pages.
@@ -100,11 +113,12 @@ Always running on `GIF_PORT` (default 8765), plain HTTP, no dependencies:
 
 | Path | What |
 |---|---|
-| `/` | A page showing what the Pixoo is showing (auto-refreshes every 30 s) |
+| `/` | Live page: the current screen, the flight's details and nearby traffic, polling `/api/current` every 5 s |
+| `/api/current` | JSON: the flight on screen, up to 15 nearby aircraft (distance, direction, tags), mode, age |
 | `/latest.gif` | The current animation |
 | `/<token>/<n>.gif` | Hosted GIFs for the Pixoo |
 | `/<token>/check` | Start-up self-check |
 | `/health` | JSON health status (200 / 503) |
 
 All responses are `Cache-Control: no-store`. It's meant for your LAN: there's no
-authentication, and the only content is the picture on your Pixoo.
+authentication, and the only content is the picture on your Pixoo and public flight data.

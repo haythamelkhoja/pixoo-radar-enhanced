@@ -6,6 +6,22 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `SPLIT_FLAP=all|digits|off`: flight values on departures-board tiles that flip to each
+  new value, either every character or digits only.
+- Compass direction to the plane in place of the "DIST" label (`SHOW_DIRECTION`).
+- Military and rare aircraft: flashing border and MIL/RARE badge, shown ahead of closer
+  ordinary flights (`HIGHLIGHT_MILITARY`, `HIGHLIGHT_RARE`, `PRIORITIZE_HIGHLIGHTS`,
+  `RARE_TYPES`, `RARE_REGISTRATIONS`, `MILITARY_CALLSIGNS`, `COLOR_MILITARY`, `COLOR_RARE`).
+- `IGNORE_HELICOPTERS` (on by default) and `SKIP_UNKNOWN_DESTINATION`.
+- Live web page: current screen, flight details and nearby traffic, updating every 5 s,
+  backed by a new `/api/current` JSON endpoint.
+
+### Changed
+- Military aircraft are now shown (highlighted) by default; set `HIGHLIGHT_MILITARY=false`
+  to skip them as before. Helicopters with a flight number are now skipped by default.
+- `--preview` PNGs show each page once its values have settled.
+
 ## [0.1.3] - 2026-10-23
 
 ### Added
