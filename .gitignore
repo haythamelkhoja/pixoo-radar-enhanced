@@ -9,8 +9,9 @@ __pycache__/
 .venv/
 venv/
 
-# --preview output
+# --preview output, default history folder
 preview/
+data/
 
 # OS / editors
 .DS_Store

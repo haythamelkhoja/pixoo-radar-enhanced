@@ -8,6 +8,7 @@ animated plane, and a panel cycling flight number, altitude, aircraft type,
 registration, speed, distance and direction (optionally on split-flap tiles).
 Military and rare aircraft are highlighted and shown first. Checks for a new
 closest flight every REFRESH_SECONDS; the built-in web server shows it live.
+Optionally logs every aircraft seen (SQLite or CSV) and publishes to MQTT.
 
 With GIF_BASE_URL set, each animation is served as a GIF from a small built-in
 web server and the Pixoo fetches and plays it itself (Device/PlayTFGif), so the
@@ -25,20 +26,25 @@ name, e.g.  PIXOO_HOST=192.168.1.50 REFRESH_SECONDS=90 python pixoo_radar.py
 PIXOO_HOST, HOME_LAT and HOME_LON are required.
 
 Inspired by chrivoge/PixooRadar. Flight data comes from FlightRadar24's public
-web endpoints via the unofficial FlightRadarAPI package, so keep it to personal use.
+web endpoints via the unofficial FlightRadarAPI package (so keep it to personal use),
+or from adsb.lol, your own ADS-B receiver or OpenSky, with details from adsbdb.com.
 """
 
 import argparse
 import base64
+import csv
 import hashlib
 import ipaddress
 import json
 import logging
 import math
 import os
+import re
 import secrets
 import signal
 import socket
+import sqlite3
+import struct
 import sys
 import threading
 import time
@@ -63,10 +69,13 @@ def _setting(name, default):
         return default
     if isinstance(default, bool):
         return raw.lower() in ("1", "true", "yes", "on")
-    if isinstance(default, int):
-        return int(raw)
-    if isinstance(default, float):
-        return float(raw)
+    try:
+        if isinstance(default, int):
+            return int(raw)
+        if isinstance(default, float):
+            return float(raw)
+    except ValueError:
+        sys.exit(f"{name}={raw!r} isn't a valid {'whole number' if isinstance(default, int) else 'number'}")
     if isinstance(default, tuple):
         return tuple(part.strip().lower() for part in raw.split(",") if part.strip())
     return raw
@@ -79,6 +88,13 @@ HOME_LAT = _setting("HOME_LAT", 0.0)                       # your location (requ
 HOME_LON = _setting("HOME_LON", 0.0)
 RADAR_RADIUS_KM = _setting("RADAR_RADIUS_KM", 100)
 SHOW_GROUND_TRAFFIC = _setting("SHOW_GROUND_TRAFFIC", False)  # include parked/taxiing aircraft
+
+# Where positions come from, tried in order: fr24, adsb (adsb.lol or your own receiver), opensky
+DATA_SOURCE = _setting("DATA_SOURCE", ("fr24",))
+ADSB_URL = _setting("ADSB_URL", "https://api.adsb.lol/v2/point/{lat}/{lon}/{radius_nm}")  # or .../aircraft.json
+LOOKUP_ADSBDB = _setting("LOOKUP_ADSBDB", True)   # route, airline, type from adsbdb.com (adsb/opensky)
+OPENSKY_CLIENT_ID = _setting("OPENSKY_CLIENT_ID", "")         # optional OpenSky API client:
+OPENSKY_CLIENT_SECRET = _setting("OPENSKY_CLIENT_SECRET", "")  # higher rate limit
 IGNORE_HELICOPTERS = _setting("IGNORE_HELICOPTERS", True)
 SKIP_UNKNOWN_DESTINATION = _setting("SKIP_UNKNOWN_DESTINATION", False)  # e.g. positioning/training flights
 
@@ -103,6 +119,7 @@ COLOR_RARE = _setting("COLOR_RARE", "#00C8FF")
 REFRESH_SECONDS = _setting("REFRESH_SECONDS", 60)          # how often to look for the closest flight
 FRAME_MS = _setting("FRAME_MS", 300)                         # animation speed
 SHOW_DIRECTION = _setting("SHOW_DIRECTION", True)            # compass point of the plane in place of "DIST"
+SHOW_HEADING = _setting("SHOW_HEADING", True)                # arrow after the speed: the way it's flying
 # Flight values on flipping departures-board tiles: off, all (every character) or digits
 SPLIT_FLAP = {"1": "all", "true": "all", "yes": "all", "on": "all", "all": "all", "digits": "digits"}.get(
     _setting("SPLIT_FLAP", "off").lower(), "off")
@@ -123,6 +140,22 @@ COLOR_SEPARATOR = "#555555"
 COLOR_ROUTE = "#666666"
 COLOR_PLANE = "#FFFFFF"
 COLOR_WHITE = "#FFFFFF"
+
+# Log of every aircraft that passed through the radius: off, sqlite or csv, kept for N days
+HISTORY = _setting("HISTORY", "off").lower()
+HISTORY_DIR = _setting("HISTORY_DIR", "data")
+HISTORY_RETENTION_DAYS = _setting("HISTORY_RETENTION_DAYS", 30)
+HISTORY_TRIM_HOURS = _setting("HISTORY_TRIM_HOURS", 1)        # how often old entries are removed
+
+# Optional MQTT (Home Assistant discovery included); needs MQTT_HOST
+MQTT_HOST = _setting("MQTT_HOST", "")
+MQTT_PORT = _setting("MQTT_PORT", 1883)
+MQTT_USERNAME = _setting("MQTT_USERNAME", "")
+MQTT_PASSWORD = _setting("MQTT_PASSWORD", "")
+MQTT_TLS = _setting("MQTT_TLS", False)
+MQTT_TOPIC = _setting("MQTT_TOPIC", "pixoo_radar")
+MQTT_DISCOVERY = _setting("MQTT_DISCOVERY", True)
+MQTT_DISCOVERY_PREFIX = _setting("MQTT_DISCOVERY_PREFIX", "homeassistant")
 
 HTTP_TIMEOUT = (5, 20)        # connect, read (seconds)
 GIF_RESET_EVERY = 32          # fresh animation-id counter every N uploads (Pixoo freezes otherwise)
@@ -166,6 +199,10 @@ F57 = _font({
     ":": ". . # . . # .", ".": ". . . . . . #", "/": "....# ...#. ...#. ..#.. .#... .#... #....",
     "+": "..... ..#.. ..#.. ##### ..#.. ..#.. .....", "?": ".###. #...# ....# ...#. ..#.. ..... ..#..",
     "▲": "..... ..... ..#.. .###. ##### ..... .....", "▼": "..... ..... ##### .###. ..#.. ..... .....",
+    "↑": "..#.. .###. #.#.# ..#.. ..#.. ..#.. ..#..", "↓": "..#.. ..#.. ..#.. ..#.. #.#.# .###. ..#..",
+    "→": "..... ..#.. ...#. ##### ...#. ..#.. .....", "←": "..... ..#.. .#... ##### .#... ..#.. .....",
+    "↗": "..... ..### ...## ..#.# .#... #.... .....", "↘": "..... #.... .#... ..#.# ...## ..### .....",
+    "↙": "..... ....# ...#. #.#.. ##... ###.. .....", "↖": "..... ###.. ##... #.#.. ...#. ....# .....",
 })
 
 F35 = _font({
@@ -264,19 +301,52 @@ class Pixoo:
             raise
 
 
+def _gif_image_block(image, left, top):
+    """GIF image descriptor plus LZW data for one paletted image, compressed by Pillow."""
+    buf = BytesIO()
+    image.save(buf, format="GIF", optimize=False, interlace=False)
+    data = buf.getvalue()
+    i = 13 + (3 << ((data[10] & 7) + 1) if data[10] & 0x80 else 0)   # past header and global colour table
+    while data[i] == 0x21:                                            # past any extensions
+        i += 2
+        while data[i]:
+            i += data[i] + 1
+        i += 1
+    packed = data[i + 9]
+    body = data[i + 10 + (3 << ((packed & 7) + 1) if packed & 0x80 else 0):-1]   # LZW data, without the trailer
+    return struct.pack("<BHHHHB", 0x2C, left, top, image.width, image.height, 0) + body
+
+
 def encode_gif(frames, frame_ms):
     """Encode frames the way the Pixoo plays hosted GIFs cleanly: one global palette,
-    no transparency, later frames cropped to what changed (disposal 1), one delay, looping."""
+    no transparency, later frames cropped to what changed (disposal 1), one delay, looping.
+
+    Written by hand because Pillow merges repeated frames into one with a longer delay;
+    a repeat here is a 1x1 frame that changes nothing, so every frame keeps the same delay."""
     strip = Image.new("RGB", (64, 64 * len(frames)))
     for i, frame in enumerate(frames):
         strip.paste(frame, (0, 64 * i))
     palette = strip.quantize(colors=256, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE)
-    indexed = [frame.quantize(palette=palette, dither=Image.Dither.NONE) for frame in frames]
+    used = palette.getpalette()[:768]
+    bits = max(0, (len(used) // 3 - 1).bit_length() - 1)             # table holds 2 << bits colours
+    colors = bytes(used).ljust(3 * (2 << bits), b"\0")
+    delay = max(1, round(frame_ms / 10))   # GIF delays are in hundredths of a second
+
     out = BytesIO()
-    indexed[0].save(
-        out, format="GIF", save_all=True, append_images=indexed[1:], duration=frame_ms, loop=0,
-        disposal=1, optimize=False, palette=bytes(palette.getpalette()[:768]),
-    )
+    out.write(b"GIF89a" + struct.pack("<HHBBB", 64, 64, 0xF0 | bits, 0, 0) + colors)   # global colour table
+    out.write(b"\x21\xff\x0bNETSCAPE2.0\x03\x01\x00\x00\x00")              # loop forever
+    previous = None
+    for frame in frames:
+        frame = frame.convert("RGB")
+        if previous is None:
+            box = (0, 0, 64, 64)
+        else:
+            box = ImageChops.difference(frame, previous).getbbox() or (0, 0, 1, 1)
+        previous = frame
+        indexed = frame.crop(box).quantize(palette=palette, dither=Image.Dither.NONE)
+        out.write(struct.pack("<BBBBHBB", 0x21, 0xF9, 4, 0x04, delay, 0, 0))   # disposal 1, no transparency
+        out.write(_gif_image_block(indexed, box[0], box[1]))
+    out.write(b"\x3b")
     return out.getvalue()
 
 
@@ -305,10 +375,12 @@ table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
 th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
 th{color:var(--dim);font-weight:500}tr.on td{color:var(--accent)}
 .scroll{overflow-x:auto}.dim{color:var(--dim);font-size:13px}
+.stats{display:flex;gap:20px;flex-wrap:wrap;margin:6px 0 10px;font-size:22px}.stats .dim{font-size:14px}
 </style>
 <main>
   <div class="card"><img id="screen" src="latest.gif" alt="What the Pixoo is showing"></div>
   <div class="card" id="flight"><p class="dim">Waiting for the first flight…</p></div>
+  <div class="card wide" id="today" hidden></div>
   <div class="card wide"><div class="dim" style="margin-bottom:8px">Nearby traffic</div>
     <div class="scroll"><table id="traffic"></table></div></div>
   <p class="dim wide" id="updated"></p>
@@ -318,6 +390,7 @@ const $ = (tag, text, cls) => { const e = document.createElement(tag);
   if (text != null) e.textContent = text; if (cls) e.className = cls; return e; };
 const km = d => d == null ? "" : (d < 10 ? d.toFixed(1) : Math.round(d)) + " km";
 const ft = a => a == null ? "" : a <= 0 ? "ground" : a.toLocaleString() + " ft";
+const arrows = "↑↗→↘↓↙←↖";
 const tags = (el, list) => (list || []).forEach(t => el.append($("span", t === "military" ? "MIL" : "RARE", "tag " + t)));
 let shown = null;
 function render(s) {
@@ -330,23 +403,41 @@ function render(s) {
     box.append($("div", (f.origin || "---") + " → " + (f.destination || "---"), "route"));
     const dl = $("dl");
     for (const [k, v] of [["Altitude", f.altitude_text], ["Speed", f.speed ? f.speed + " kt" : ""],
-                          ["Distance", km(f.distance_km) + " " + f.direction], ["Aircraft", f.aircraft],
+                          ["Distance", km(f.distance_km) + " " + f.direction], ["Heading", f.heading_text],
+                          ["Aircraft", f.aircraft],
                           ["Registration", f.registration]]) { dl.append($("dt", k), $("dd", v || "—")); }
     box.append(dl);
   }
   const t = document.getElementById("traffic"); t.replaceChildren();
-  const head = $("tr"); ["Flight", "Type", "Route", "Altitude", "Distance", ""].forEach(c => head.append($("th", c)));
+  const head = $("tr");
+  ["Flight", "Type", "Route", "Altitude", "Distance", "", "Heading"].forEach(c => head.append($("th", c)));
   t.append(head);
   for (const r of s.traffic || []) {
     const tr = $("tr", null, f && r.flight === f.flight ? "on" : "");
     const name = $("td", r.flight); tags(name, r.tags);
     tr.append(name, $("td", r.aircraft || ""), $("td", (r.origin || "") + "–" + (r.destination || "")),
-              $("td", ft(r.altitude)), $("td", km(r.distance_km)), $("td", r.direction));
+              $("td", ft(r.altitude)), $("td", km(r.distance_km)), $("td", r.direction),
+              $("td", r.heading == null ? "" : arrows[Math.round(r.heading / 45) % 8] + " " + Math.round(r.heading) + "°"));
     t.append(tr);
   }
   if (!(s.traffic || []).length) { const tr = $("tr"); tr.append($("td", s.note || "No traffic yet")); t.append(tr); }
+  const today = document.getElementById("today"), st = s.stats;
+  today.hidden = !st;
+  if (st) {
+    today.replaceChildren($("div", "Seen today", "dim"));
+    const nums = $("div", null, "stats");
+    for (const [k, v] of [["aircraft", st.today], ["military", st.military_today], ["rare", st.rare_today]]) {
+      const b = $("span"); b.append($("strong", String(v)), $("span", " " + k + "  ", "dim")); nums.append(b);
+    }
+    today.append(nums);
+    for (const r of st.recent_highlights || []) {
+      const line = $("div", (r.flight || r.callsign || r.hex) + " · " + (r.aircraft || "?") + " · " +
+                    km(r.closest_km) + " · " + (r.last_seen || "").slice(11, 16) + " UTC", "dim");
+      tags(line, r.tags); today.append(line);
+    }
+  }
   document.getElementById("updated").textContent = s.age_seconds == null ? "Starting…" :
-    "Updated " + s.age_seconds + " s ago · " + (s.mode || "");
+    "Updated " + s.age_seconds + " s ago · " + (s.mode || "") + (s.source ? " · data: " + s.source : "");
 }
 async function tick() {
   try { render(await (await fetch("api/current", {cache: "no-store"})).json()); }
@@ -395,6 +486,11 @@ class GifHost:
                     data, ctype = host.check_body, "text/plain"
                 elif path == "api/current":
                     data, ctype = json.dumps(host.current()).encode(), "application/json"
+                elif path == "api/history":
+                    query = dict(p.split("=", 1) for p in self.path.partition("?")[2].split("&") if "=" in p)
+                    limit = int(query["limit"]) if query.get("limit", "").isdigit() else 100
+                    rows = history.entries(limit=min(limit, 5000)) if history else []
+                    data, ctype = json.dumps(rows).encode(), "application/json"
                 elif path == "health":
                     healthy, body = host.health()
                     data, ctype, status = json.dumps(body).encode(), "application/json", 200 if healthy else 503
@@ -491,7 +587,7 @@ class GifHost:
 
 
 # =============================================================================
-# Helpers for FlightRadar24 data
+# Flight data: sources, classification and lookups
 # =============================================================================
 
 def is_missing(value):
@@ -532,7 +628,43 @@ def compass(degrees):
     return ("N", "NE", "E", "SE", "S", "SW", "W", "NW")[round(degrees / 45) % 8]
 
 
-# Best-effort classification from the live feed (ICAO type designators, address blocks)
+def arrow(degrees):
+    """Arrow pointing the way a plane on this heading is flying (north up)."""
+    return "↑↗→↘↓↙←↖"[round(degrees / 45) % 8]
+
+
+USER_AGENT = {"User-Agent": "pixoo-radar (+https://github.com/haythamelkhoja/pixoo-radar-enhanced)"}
+AIRLINE_CALLSIGN = re.compile(r"^[A-Z]{3}\d[A-Z0-9]{0,4}$")   # e.g. UAE29, BAW135, EZY97ND
+
+
+@dataclass
+class Aircraft:
+    """One aircraft from the live feed, whichever source it came from."""
+    source: str
+    hex: str                      # 24-bit ICAO address, lower-case hex
+    callsign: str
+    latitude: float
+    longitude: float
+    altitude: int = None          # feet
+    speed: int = None             # knots
+    vspeed: int = None            # feet per minute
+    heading: float = None         # track over the ground, degrees from north
+    on_ground: bool = False
+    flight: str = None            # flight number, e.g. EK29
+    airline_flight: bool = False  # flown by an airline (has a flight number or an airline callsign)
+    airline: str = None
+    airline_iata: str = None
+    airline_icao: str = None
+    aircraft: str = None          # ICAO type designator, e.g. A388
+    registration: str = None
+    origin: str = None            # IATA airport codes
+    destination: str = None
+    military: bool = False        # flagged as military by the source itself
+    rotorcraft: bool = False      # flagged as a helicopter by the source itself
+    ref: object = None            # the source's own record, for enrich()
+
+
+# Best-effort classification (ICAO type designators, address blocks, callsigns)
 HELICOPTER_TYPES = frozenset("""
     R22 R44 R66 B06 B06T B407 B412 B429 B430 B505 B212 B222 B230 EC20 EC25 EC30 EC35 EC45 EC55
     EC75 H160 AS32 AS50 AS55 AS65 AS3B A109 A119 A139 A169 A189 S76 S92 S61 H47 H60 UH1 MI8 MI24
@@ -545,30 +677,247 @@ MILITARY_TYPES = frozenset("""
 MILITARY_HEX = ((0xAE0000, 0xAFFFFF), (0x43C000, 0x43CFFF))   # US and UK military 24-bit addresses
 
 
-def is_helicopter(f):
-    return str(f.aircraft_code or "").upper() in HELICOPTER_TYPES
+def is_helicopter(a):
+    return a.rotorcraft or str(a.aircraft or "").upper() in HELICOPTER_TYPES
 
 
-def is_military(f):
+def is_military(a):
+    if a.military:
+        return True
     try:
-        address = int(str(f.icao_24bit), 16)
-    except ValueError:
+        address = int(a.hex, 16)
+    except (TypeError, ValueError):
         address = None
     if address is not None and any(lo <= address <= hi for lo, hi in MILITARY_HEX):
         return True
-    callsign, operator = str(f.callsign or "").lower(), str(f.airline_icao or "").lower()
-    return (str(f.aircraft_code or "").upper() in MILITARY_TYPES or operator in MILITARY_CALLSIGNS
+    callsign, operator = str(a.callsign or "").lower(), str(a.airline_icao or "").lower()
+    return (str(a.aircraft or "").upper() in MILITARY_TYPES or operator in MILITARY_CALLSIGNS
             or any(callsign.startswith(prefix) for prefix in MILITARY_CALLSIGNS))
 
 
-def is_rare(f):
-    return str(f.aircraft_code or "").lower() in RARE_TYPES or str(f.registration or "").lower() in RARE_REGISTRATIONS
+def is_rare(a):
+    return (str(a.aircraft or "").lower() in RARE_TYPES
+            or str(a.registration or "").lower().replace("-", "") in {r.replace("-", "") for r in RARE_REGISTRATIONS})
 
 
-def highlights(f):
+def highlights(a):
     """("military",), ("rare",), both or neither, as far as the highlight settings allow."""
     return tuple(tag for tag, on, test in (("military", HIGHLIGHT_MILITARY, is_military), ("rare", HIGHLIGHT_RARE, is_rare))
-                 if on and test(f))
+                 if on and test(a))
+
+
+class FR24Source:
+    """FlightRadar24 via the unofficial FlightRadarAPI package: positions, routes, types."""
+    name = "fr24"
+
+    def fetch(self):
+        bounds = fr24.get_bounds_by_point(HOME_LAT, HOME_LON, RADAR_RADIUS_KM * 1000)
+        return [self.aircraft(f) for f in fr24.get_flights(bounds=bounds) or []
+                if number(f.latitude) is not None and number(f.longitude) is not None]
+
+    @staticmethod
+    def aircraft(f):
+        on_ground = f.on_ground in (1, True, "1") or (
+            number(f.altitude) in (0, None) and number(f.ground_speed) in (0, None))
+        return Aircraft(
+            source="fr24", hex=str(first(f.icao_24bit) or "").lower(), callsign=str(first(f.callsign) or "").upper(),
+            latitude=f.latitude, longitude=f.longitude, altitude=number(f.altitude), speed=number(f.ground_speed),
+            vspeed=number(f.vertical_speed), heading=number(f.heading), on_ground=on_ground,
+            flight=first(f.number), airline_flight=not is_missing(f.airline_iata),
+            airline_iata=first(f.airline_iata), airline_icao=first(f.airline_icao), aircraft=first(f.aircraft_code),
+            registration=first(f.registration), origin=first(f.origin_airport_iata),
+            destination=first(f.destination_airport_iata), ref=f,
+        )
+
+    def enrich(self, a):
+        try:
+            details = fr24.get_flight_details(a.ref) or {}
+        except Exception as exc:
+            log.warning("Details unavailable for %s (%s); using live feed only", a.callsign, exc)
+            details = {}
+
+        def get(*keys):
+            return dig(details, *keys)
+
+        a.flight = first(get("identification", "number", "default"), a.flight, a.callsign)
+        a.airline = first(get("airline", "name"))
+        a.airline_iata = first(get("airline", "code", "iata"), a.airline_iata)
+        a.airline_icao = first(get("airline", "code", "icao"), a.airline_icao)
+        a.origin = first(get("airport", "origin", "code", "iata"), a.origin)
+        a.destination = first(get("airport", "destination", "code", "iata"), a.destination)
+        a.aircraft = first(get("aircraft", "model", "code"), a.aircraft)
+        a.registration = first(get("aircraft", "registration"), a.registration)
+
+
+class ADSBSource:
+    """Any readsb-style JSON feed: adsb.lol (default), or your own receiver's aircraft.json."""
+    name = "adsb"
+
+    def fetch(self):
+        url = ADSB_URL.format(lat=HOME_LAT, lon=HOME_LON, radius_km=RADAR_RADIUS_KM,
+                              radius_nm=min(250, math.ceil(RADAR_RADIUS_KM / 1.852)))
+        resp = requests.get(url, timeout=HTTP_TIMEOUT, headers=USER_AGENT)
+        resp.raise_for_status()
+        data = resp.json()
+        rows = data.get("ac", data.get("aircraft")) if isinstance(data, dict) else None
+        if not isinstance(rows, list):
+            raise ValueError(f"{url} didn't return a readsb aircraft list")
+        return [a for a in map(self.aircraft, rows) if a is not None]
+
+    @staticmethod
+    def aircraft(r):
+        if not isinstance(r, dict):
+            return None
+        lat, lon = number(r.get("lat")), number(r.get("lon"))
+        if lat is None or lon is None:
+            return None
+        callsign = str(r.get("flight") or "").strip().upper()
+        airline_style = bool(AIRLINE_CALLSIGN.match(callsign))
+        ground = r.get("alt_baro") == "ground"
+        altitude = 0 if ground else first(number(r.get("alt_baro")), number(r.get("alt_geom")))
+        flags = number(r.get("dbFlags")) or 0
+        return Aircraft(
+            source="adsb", hex=str(r.get("hex") or "").lstrip("~").lower(), callsign=callsign,
+            latitude=lat, longitude=lon, altitude=altitude, speed=number(r.get("gs")),
+            vspeed=first(number(r.get("baro_rate")), number(r.get("geom_rate"))),
+            heading=first(number(r.get("track")), number(r.get("true_heading"))), on_ground=ground,
+            airline_flight=airline_style, airline_icao=callsign[:3] if airline_style else None,
+            aircraft=first(r.get("t")), registration=first(r.get("r")),
+            military=bool(int(flags) & 1), rotorcraft=r.get("category") == "A7",
+        )
+
+    def enrich(self, a):
+        lookup_adsbdb(a)
+
+
+class OpenSkySource:
+    """OpenSky Network state vectors: positions only, so the rest comes from adsbdb.
+    Anonymous use allows ~400 requests a day, so it's polled at most every 4 minutes
+    (every 30 s with OPENSKY_CLIENT_ID/SECRET from an OpenSky account)."""
+    name = "opensky"
+    URL = "https://opensky-network.org/api/states/all"
+    TOKEN_URL = "https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token"
+
+    def __init__(self):
+        self.token, self.token_expires = None, 0.0
+        self.cached, self.fetched_at = None, 0.0
+
+    @property
+    def min_interval(self):
+        return 30 if OPENSKY_CLIENT_ID and OPENSKY_CLIENT_SECRET else 240
+
+    def _headers(self):
+        if not (OPENSKY_CLIENT_ID and OPENSKY_CLIENT_SECRET):
+            return dict(USER_AGENT)
+        if self.token is None or time.time() >= self.token_expires - 60:
+            resp = requests.post(self.TOKEN_URL, timeout=HTTP_TIMEOUT, data={
+                "grant_type": "client_credentials", "client_id": OPENSKY_CLIENT_ID,
+                "client_secret": OPENSKY_CLIENT_SECRET})
+            resp.raise_for_status()
+            body = resp.json()
+            self.token, self.token_expires = body["access_token"], time.time() + float(body.get("expires_in", 1800))
+        return {**USER_AGENT, "Authorization": f"Bearer {self.token}"}
+
+    def fetch(self):
+        if self.cached is not None and time.monotonic() - self.fetched_at < self.min_interval:
+            return self.cached
+        dlat = RADAR_RADIUS_KM / 111.32
+        dlon = RADAR_RADIUS_KM / (111.32 * max(0.01, math.cos(math.radians(HOME_LAT))))
+        params = {"lamin": max(-90, HOME_LAT - dlat), "lamax": min(90, HOME_LAT + dlat),
+                  "lomin": max(-180, HOME_LON - dlon), "lomax": min(180, HOME_LON + dlon), "extended": 1}
+        resp = requests.get(self.URL, params=params, headers=self._headers(), timeout=HTTP_TIMEOUT)
+        if resp.status_code == 429:
+            raise RuntimeError("OpenSky's daily request limit is used up "
+                               f"(retry in {resp.headers.get('X-Rate-Limit-Retry-After-Seconds', '?')}s)")
+        resp.raise_for_status()
+        states = (resp.json() or {}).get("states") or []
+        self.cached, self.fetched_at = [a for a in map(self.aircraft, states) if a is not None], time.monotonic()
+        return self.cached
+
+    @staticmethod
+    def aircraft(s):
+        if not isinstance(s, list) or len(s) < 12:
+            return None
+        lat, lon = number(s[6]), number(s[5])
+        if lat is None or lon is None:
+            return None
+        callsign = str(s[1] or "").strip().upper()
+        airline_style = bool(AIRLINE_CALLSIGN.match(callsign))
+        metres = first(number(s[7]), number(s[13]) if len(s) > 13 else None)
+        ground = bool(s[8])
+        return Aircraft(
+            source="opensky", hex=str(s[0] or "").lower(), callsign=callsign, latitude=lat, longitude=lon,
+            altitude=0 if ground else (round(metres * 3.28084) if metres is not None else None),
+            speed=round(s[9] * 1.94384) if number(s[9]) is not None else None,
+            vspeed=round(s[11] * 196.85) if number(s[11]) is not None else None,
+            heading=number(s[10]), on_ground=ground,
+            airline_flight=airline_style, airline_icao=callsign[:3] if airline_style else None,
+            rotorcraft=len(s) > 17 and s[17] == 8,
+        )
+
+    def enrich(self, a):
+        lookup_adsbdb(a)
+
+
+SOURCES = {source.name: source for source in (FR24Source(), ADSBSource(), OpenSkySource())}
+
+_lookups = {}   # adsbdb path -> (response or None, expires_at)
+
+
+def _adsbdb(path):
+    """GET https://api.adsbdb.com/v0/<path>, cached (a day for hits, 6 h for misses, 10 min for errors)."""
+    cached = _lookups.get(path)
+    if cached and cached[1] > time.time():
+        return cached[0]
+    try:
+        resp = requests.get(f"https://api.adsbdb.com/v0/{path}", timeout=HTTP_TIMEOUT, headers=USER_AGENT)
+        if resp.status_code == 404:
+            data, ttl = None, 6 * 3600
+        else:
+            resp.raise_for_status()
+            data = dig(resp.json(), "response")
+            data, ttl = (data, 86400) if isinstance(data, dict) else (None, 6 * 3600)
+    except Exception as exc:
+        log.debug("adsbdb %s failed: %s", path, exc)
+        data, ttl = None, 600
+    if len(_lookups) > 5000:
+        now = time.time()
+        for key in [k for k, (_, expires) in _lookups.items() if expires <= now]:
+            del _lookups[key]
+    _lookups[path] = (data, time.time() + ttl)
+    return data
+
+
+def lookup_adsbdb(a):
+    """Fill in flight number, airline, route, type and registration from adsbdb.com."""
+    if not LOOKUP_ADSBDB:
+        return
+    route = dig(_adsbdb(f"callsign/{a.callsign}"), "flightroute") if AIRLINE_CALLSIGN.match(a.callsign or "") else None
+    if route:
+        a.flight = first(route.get("callsign_iata"), a.flight)
+        a.airline = first(dig(route, "airline", "name"), a.airline)
+        a.airline_iata = first(dig(route, "airline", "iata"), a.airline_iata)
+        a.airline_icao = first(dig(route, "airline", "icao"), a.airline_icao)
+        a.origin = first(dig(route, "origin", "iata_code"), a.origin)
+        a.destination = first(dig(route, "destination", "iata_code"), a.destination)
+    if a.hex and re.fullmatch(r"[0-9a-f]{6}", a.hex) and (is_missing(a.aircraft) or is_missing(a.registration)):
+        craft = dig(_adsbdb(f"aircraft/{a.hex}"), "aircraft")
+        if craft:
+            a.aircraft = first(a.aircraft, craft.get("icao_type"))
+            a.registration = first(a.registration, craft.get("registration"))
+
+
+def fetch_traffic():
+    """Aircraft from the first DATA_SOURCE that answers."""
+    error = None
+    for name in DATA_SOURCE:
+        try:
+            return SOURCES[name].fetch()
+        except Exception as exc:
+            error = exc
+            if len(DATA_SOURCE) > 1:
+                log.warning("%s unavailable (%s)%s", name, exc, "; trying the next source" if name != DATA_SOURCE[-1] else "")
+    raise error
 
 
 # =============================================================================
@@ -674,78 +1023,91 @@ class Nearby:
     speed: int
     vspeed: int
     distance_km: float
-    bearing: float = 0.0
+    bearing: float = 0.0                            # from home to the plane
+    heading: float = None                           # the way the plane is flying
     tags: tuple = ()                                # "military" and/or "rare"
+    callsign: str = ""
+    hex: str = ""
+    source: str = ""
     traffic: list = field(default_factory=list)     # everything else in range, for the web page
 
 
-def _on_ground(f):
-    if f.on_ground in (1, True, "1"):
-        return True
-    return number(f.altitude) in (0, None) and number(f.ground_speed) in (0, None)
+MAX_LOOKUPS = 5   # candidates enriched per update when SKIP_UNKNOWN_DESTINATION needs routes
 
 
-def _candidates():
-    """(flight, tags, distance) for everything worth showing in range, closest first."""
-    bounds = fr24.get_bounds_by_point(HOME_LAT, HOME_LON, RADAR_RADIUS_KM * 1000)
+def _candidates(aircraft):
+    """(aircraft, tags, distance) for everything worth showing within RADAR_RADIUS_KM, closest first."""
     found = []
-    for f in fr24.get_flights(bounds=bounds) or []:
-        if number(f.latitude) is None or number(f.longitude) is None:
+    for a in aircraft:
+        distance = haversine_km(HOME_LAT, HOME_LON, a.latitude, a.longitude)
+        if distance > RADAR_RADIUS_KM:   # sources search a box; keep the circle
             continue
-        if (not SHOW_GROUND_TRAFFIC and _on_ground(f)) or (IGNORE_HELICOPTERS and is_helicopter(f)):
+        if (not SHOW_GROUND_TRAFFIC and a.on_ground) or (IGNORE_HELICOPTERS and is_helicopter(a)):
             continue
-        tags = highlights(f)
-        if not tags:   # ordinary traffic: airline flights only
-            if is_missing(f.airline_iata) or (SKIP_UNKNOWN_DESTINATION and is_missing(f.destination_airport_iata)):
+        tags = highlights(a)
+        if not tags:   # ordinary traffic: airline flights only (and no military unless highlighted)
+            if not a.airline_flight or is_military(a):
                 continue
-        found.append((f, tags, haversine_km(HOME_LAT, HOME_LON, f.latitude, f.longitude)))
+            if SKIP_UNKNOWN_DESTINATION and a.source == "fr24" and is_missing(a.destination):
+                continue
+        found.append((a, tags, distance))
     return sorted(found, key=lambda c: c[2])
 
 
-def _traffic_row(f, tags, distance):
+def _traffic_row(a, tags, distance):
     return {
-        "flight": str(first(f.number, f.callsign) or "").upper(),
-        "aircraft": first(f.aircraft_code),
-        "origin": first(f.origin_airport_iata),
-        "destination": first(f.destination_airport_iata),
-        "altitude": number(f.altitude),
+        "flight": str(first(a.flight, a.callsign) or "").upper(),
+        "callsign": a.callsign,
+        "hex": a.hex,
+        "aircraft": first(a.aircraft),
+        "registration": first(a.registration),
+        "origin": first(a.origin),
+        "destination": first(a.destination),
+        "altitude": a.altitude,
+        "speed": a.speed,
+        "heading": a.heading,
         "distance_km": round(distance, 1),
-        "direction": compass(bearing_deg(HOME_LAT, HOME_LON, f.latitude, f.longitude)),
+        "direction": compass(bearing_deg(HOME_LAT, HOME_LON, a.latitude, a.longitude)),
         "tags": list(tags),
     }
 
 
 def fetch_nearest():
-    candidates = _candidates()
+    candidates = _candidates(fetch_traffic())
+    if history:
+        history.observe(candidates)
     if not candidates:
         return None
     # Closest first; with PRIORITIZE_HIGHLIGHTS a military or rare aircraft anywhere in range wins
-    f, tags, distance = min(candidates, key=lambda c: (PRIORITIZE_HIGHLIGHTS and not c[1], c[2]))
-
-    try:
-        details = fr24.get_flight_details(f) or {}
-    except Exception as exc:
-        log.warning("Details unavailable for %s (%s); using live feed only", f.callsign, exc)
-        details = {}
-
-    def get(*keys):
-        return dig(details, *keys)
+    ordered = sorted(candidates, key=lambda c: (PRIORITIZE_HIGHLIGHTS and not c[1], c[2]))
+    for a, tags, distance in ordered[:MAX_LOOKUPS]:
+        SOURCES[a.source].enrich(a)
+        tags = tuple(dict.fromkeys(tags + highlights(a)))   # the lookup may reveal a rare type
+        # Other sources only learn the destination from the lookup, so check it now
+        if not (SKIP_UNKNOWN_DESTINATION and not tags and is_missing(a.destination)):
+            break
+    else:
+        return None
 
     return Nearby(
-        flight=str(first(get("identification", "number", "default"), f.number, f.callsign) or "").upper(),
-        airline=str(first(get("airline", "name")) or ""),
-        airline_iata=first(get("airline", "code", "iata"), f.airline_iata),
-        airline_icao=first(get("airline", "code", "icao"), f.airline_icao),
-        origin=first(get("airport", "origin", "code", "iata"), f.origin_airport_iata),
-        destination=first(get("airport", "destination", "code", "iata"), f.destination_airport_iata),
-        aircraft=first(get("aircraft", "model", "code"), f.aircraft_code),
-        registration=first(get("aircraft", "registration"), f.registration),
-        altitude=number(f.altitude),
-        speed=number(f.ground_speed),
-        vspeed=number(f.vertical_speed),
+        flight=str(first(a.flight, a.callsign) or "").upper(),
+        airline=str(a.airline or ""),
+        airline_iata=a.airline_iata,
+        airline_icao=a.airline_icao,
+        origin=a.origin,
+        destination=a.destination,
+        aircraft=a.aircraft,
+        registration=a.registration,
+        altitude=a.altitude,
+        speed=a.speed,
+        vspeed=a.vspeed,
         distance_km=distance,
-        bearing=bearing_deg(HOME_LAT, HOME_LON, f.latitude, f.longitude),
+        bearing=bearing_deg(HOME_LAT, HOME_LON, a.latitude, a.longitude),
+        heading=a.heading,
         tags=tags,
+        callsign=a.callsign,
+        hex=a.hex,
+        source=a.source,
         traffic=[_traffic_row(*c) for c in candidates[:15]],
     )
 
@@ -765,7 +1127,9 @@ def _fmt_altitude(n):
 
 
 def _fmt_speed(n):
-    return f"{int(n.speed)}KT" if n.speed else "---"
+    if not n.speed:
+        return "---"
+    return f"{int(n.speed)}KT" + (arrow(n.heading) if SHOW_HEADING and n.heading is not None else "")
 
 
 def _fmt_distance(n):
@@ -795,7 +1159,7 @@ def _draw_field(img, top, label, value):
 # Split-flap values: a fixed board of character tiles. Each time the info panel turns
 # to its next page, the tiles that change flip through the drum, left to right.
 FLAP_SLOTS = 7            # tiles per value, right-aligned like the plain values
-FLAP_DRUM = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-./+:?▲▼"
+FLAP_DRUM = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-./+:?▲▼"   # anything else (heading arrows) changes directly
 FLAP_STEPS = 3            # drum positions shown per flip, the last one being the new character
 FLAP_SUBFRAMES = 2        # frames per plane step, so flips run at FRAME_MS / 2
 COLOR_TILE = "#151515"
@@ -918,14 +1282,305 @@ def radar_page():
 
 
 # =============================================================================
+# History: every aircraft that passed through the radius (SQLite or CSV)
+# =============================================================================
+
+def _iso(epoch):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+class History:
+    """One entry per visit: an aircraft that stays in range is one entry, written once
+    it's been out of sight for GAP seconds (or at shutdown). Entries older than
+    HISTORY_RETENTION_DAYS are removed every HISTORY_TRIM_HOURS."""
+
+    FIELDS = ("first_seen", "last_seen", "flight", "callsign", "hex", "airline", "aircraft", "registration",
+              "origin", "destination", "closest_km", "lowest_ft", "tags", "shown", "source")
+    GAP = 600
+    STATS_TTL = 60
+
+    def __init__(self, kind, directory, retention_days=None, trim_hours=None):
+        os.makedirs(directory, exist_ok=True)
+        self.kind = kind
+        self.retention_days = HISTORY_RETENTION_DAYS if retention_days is None else retention_days
+        self.trim_hours = HISTORY_TRIM_HOURS if trim_hours is None else trim_hours
+        self.path = os.path.join(directory, "history.sqlite" if kind == "sqlite" else "history.csv")
+        self.lock = threading.RLock()
+        self.active = {}                 # key -> entry, for aircraft currently in range
+        self.trimmed_at, self._stats = 0.0, (0.0, None)
+        if kind == "sqlite":
+            self.db = sqlite3.connect(self.path, check_same_thread=False)
+            columns = ", ".join(f"{f} {'REAL' if f in ('closest_km', 'lowest_ft') else 'INTEGER' if f == 'shown' else 'TEXT'}"
+                                for f in self.FIELDS)
+            self.db.execute(f"CREATE TABLE IF NOT EXISTS sightings ({columns})")
+            self.db.execute("CREATE INDEX IF NOT EXISTS sightings_last_seen ON sightings (last_seen)")
+            self.db.commit()
+        elif not os.path.exists(self.path) or os.path.getsize(self.path) == 0:
+            with open(self.path, "w", newline="", encoding="utf-8") as fh:
+                csv.writer(fh).writerow(self.FIELDS)
+        self.trim()
+
+    @staticmethod
+    def _key(hex_, callsign):
+        return hex_ or callsign
+
+    def observe(self, candidates, now=None):
+        """Record everything in range this update; write out visits that have ended."""
+        now = time.time() if now is None else now
+        with self.lock:
+            for a, tags, distance in candidates:
+                key = self._key(a.hex, a.callsign)
+                if not key:
+                    continue
+                e = self.active.setdefault(key, {"first_seen": now, "shown": False, "tags": set(),
+                                                 "closest_km": distance, "lowest_ft": None})
+                e["last_seen"] = now
+                e["closest_km"] = min(e["closest_km"], distance)
+                if a.altitude is not None:
+                    e["lowest_ft"] = a.altitude if e["lowest_ft"] is None else min(e["lowest_ft"], a.altitude)
+                e["tags"].update(tags)
+                for f in ("flight", "callsign", "hex", "airline", "aircraft", "registration", "origin", "destination", "source"):
+                    e[f] = first(getattr(a, f), e.get(f))
+            ended = [k for k, e in self.active.items() if now - e["last_seen"] > self.GAP]
+            self._write([self.active.pop(k) for k in ended])
+            if self.trim_hours > 0 and now - self.trimmed_at >= self.trim_hours * 3600:
+                self.trim(now)
+
+    def mark_shown(self, n):
+        """The flight went on screen: flag it, and keep the details the lookup found."""
+        with self.lock:
+            e = self.active.get(self._key(n.hex, n.callsign))
+            if e is None:
+                return
+            e["shown"] = True
+            e["tags"].update(n.tags)
+            for f in ("flight", "airline", "aircraft", "registration", "origin", "destination"):
+                e[f] = first(getattr(n, f), e.get(f))
+
+    def _row(self, e):
+        row = {f: e.get(f) for f in self.FIELDS}
+        row.update(first_seen=_iso(e["first_seen"]), last_seen=_iso(e["last_seen"]),
+                   closest_km=round(e["closest_km"], 1), tags=";".join(sorted(e["tags"])), shown=int(bool(e["shown"])))
+        return row
+
+    def _write(self, entries):
+        if not entries:
+            return
+        rows = [self._row(e) for e in entries]
+        if self.kind == "sqlite":
+            self.db.executemany(f"INSERT INTO sightings VALUES ({', '.join('?' * len(self.FIELDS))})",
+                                [tuple(r[f] for f in self.FIELDS) for r in rows])
+            self.db.commit()
+        else:
+            with open(self.path, "a", newline="", encoding="utf-8") as fh:
+                csv.writer(fh).writerows([[("" if r[f] is None else r[f]) for f in self.FIELDS] for r in rows])
+        self._stats = (0.0, None)
+
+    def _stored(self):
+        if self.kind == "sqlite":
+            cur = self.db.execute(f"SELECT {', '.join(self.FIELDS)} FROM sightings ORDER BY last_seen")
+            return [dict(zip(self.FIELDS, r)) for r in cur.fetchall()]
+        with open(self.path, newline="", encoding="utf-8") as fh:
+            return list(csv.DictReader(fh))
+
+    def trim(self, now=None):
+        now = time.time() if now is None else now
+        self.trimmed_at = now
+        if self.retention_days <= 0:
+            return
+        cutoff = _iso(now - self.retention_days * 86400)
+        with self.lock:
+            if self.kind == "sqlite":
+                removed = self.db.execute("DELETE FROM sightings WHERE last_seen < ?", (cutoff,)).rowcount
+                self.db.commit()
+            else:
+                rows = self._stored()
+                keep = [r for r in rows if (r.get("last_seen") or "") >= cutoff]
+                removed = len(rows) - len(keep)
+                if removed:
+                    tmp = self.path + ".tmp"
+                    with open(tmp, "w", newline="", encoding="utf-8") as fh:
+                        writer = csv.DictWriter(fh, fieldnames=self.FIELDS, extrasaction="ignore")
+                        writer.writeheader()
+                        writer.writerows(keep)
+                    os.replace(tmp, self.path)
+        if removed:
+            log.info("History: removed %s entries older than %s days", removed, self.retention_days)
+            self._stats = (0.0, None)
+
+    def entries(self, limit=100):
+        """Most recent visits first, including ones still in progress."""
+        with self.lock:
+            rows = [{**self._row(e), "active": True} for e in self.active.values()]
+            rows += [{**r, "active": False} for r in self._stored()]
+        rows.sort(key=lambda r: r["last_seen"] or "", reverse=True)
+        for r in rows:
+            r["shown"] = str(r.get("shown")) in ("1", "True")
+            r["tags"] = [t for t in str(r.get("tags") or "").split(";") if t]
+            for f in ("closest_km", "lowest_ft"):
+                r[f] = float(r[f]) if r.get(f) not in (None, "") else None
+        return rows[:limit]
+
+    def stats(self):
+        """Visits since local midnight, cached for a minute."""
+        cached_at, value = self._stats
+        if value is not None and time.time() - cached_at < self.STATS_TTL:
+            return value
+        midnight = time.mktime(time.localtime()[:3] + (0, 0, 0, 0, 0, -1))
+        today = [r for r in self.entries(limit=10**9) if (r["first_seen"] or "") >= _iso(midnight)]
+        value = {
+            "today": len(today),
+            "military_today": sum("military" in r["tags"] for r in today),
+            "rare_today": sum("rare" in r["tags"] for r in today),
+            "recent_highlights": [r for r in today if r["tags"]][:10],
+        }
+        self._stats = (time.time(), value)
+        return value
+
+    def close(self):
+        """Write out the visits in progress."""
+        with self.lock:
+            self._write(list(self.active.values()))
+            self.active.clear()
+            if self.kind == "sqlite":
+                self.db.close()
+
+
+history = None   # set by run() when HISTORY is sqlite or csv
+
+
+# =============================================================================
+# MQTT (optional): state for Home Assistant and anything else
+# =============================================================================
+
+class Mqtt:
+    """Publishes <topic>/state (retained JSON), <topic>/availability and, when a military
+    or rare aircraft comes on screen, <topic>/spotted. Registers Home Assistant sensors."""
+
+    SENSORS = (   # key, name, template on value_json, unit, device class, icon
+        ("flight", "Flight", "value_json.flight.flight", None, None, "mdi:airplane"),
+        ("airline", "Airline", "value_json.flight.airline", None, None, "mdi:airplane-marker"),
+        ("route", "Route", "(value_json.flight.origin or '---') ~ ' → ' ~ (value_json.flight.destination or '---')",
+         None, None, "mdi:map-marker-path"),
+        ("aircraft", "Aircraft type", "value_json.flight.aircraft", None, None, "mdi:airplane-cog"),
+        ("registration", "Registration", "value_json.flight.registration", None, None, "mdi:card-text"),
+        ("altitude", "Altitude", "value_json.flight.altitude", "ft", "distance", "mdi:arrow-expand-vertical"),
+        ("speed", "Speed", "value_json.flight.speed", "kn", "speed", "mdi:speedometer"),
+        ("distance", "Distance", "value_json.flight.distance_km | round(1)", "km", "distance", "mdi:map-marker-distance"),
+        ("direction", "Direction", "value_json.flight.direction", None, None, "mdi:compass"),
+        ("heading", "Heading", "value_json.flight.heading | round(0) if value_json.flight.heading is not none else None",
+         "°", None, "mdi:navigation"),
+        ("highlight", "Highlight", "value_json.flight.tags | join(', ') or 'none'", None, None, "mdi:star"),
+    )
+
+    def __init__(self):
+        import paho.mqtt.client as paho   # only needed when MQTT is on
+
+        self.topic = MQTT_TOPIC.strip("/") or "pixoo_radar"
+        self.node = re.sub(r"[^A-Za-z0-9_-]", "_", self.topic)
+        self.last_state = None
+        self.client = paho.Client(paho.CallbackAPIVersion.VERSION2, client_id=f"{self.node}-{secrets.token_hex(3)}")
+        if MQTT_USERNAME:
+            self.client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD or None)
+        if MQTT_TLS:
+            self.client.tls_set()
+        self.client.will_set(f"{self.topic}/availability", "offline", retain=True)
+        self.client.on_connect = self._on_connect
+        self.client.on_disconnect = self._on_disconnect
+        self.client.reconnect_delay_set(min_delay=1, max_delay=120)
+        self.client.connect_async(MQTT_HOST, MQTT_PORT, keepalive=60)
+        self.client.loop_start()
+
+    def _on_connect(self, client, userdata, flags, reason_code, properties):
+        if reason_code.is_failure:
+            log.warning("MQTT broker %s:%s refused the connection: %s", MQTT_HOST, MQTT_PORT, reason_code)
+            return
+        log.info("MQTT connected to %s:%s, publishing to %s/state", MQTT_HOST, MQTT_PORT, self.topic)
+        client.publish(f"{self.topic}/availability", "online", retain=True)
+        if MQTT_DISCOVERY:
+            for config_topic, config in self.discovery():
+                client.publish(config_topic, json.dumps(config), retain=True)
+        if self.last_state is not None:
+            client.publish(f"{self.topic}/state", self.last_state, retain=True)
+
+    def _on_disconnect(self, client, userdata, flags, reason_code, properties):
+        if reason_code.is_failure:
+            log.warning("MQTT connection lost (%s); reconnecting", reason_code)
+
+    def discovery(self):
+        """(topic, config) pairs for Home Assistant MQTT discovery."""
+        device = {"identifiers": [self.node], "name": "Pixoo Radar", "manufacturer": "pixoo-radar-enhanced",
+                  "model": "Pixoo Radar"}
+        common = {"state_topic": f"{self.topic}/state", "availability_topic": f"{self.topic}/availability",
+                  "device": device}
+        configs = []
+        for key, name, expression, unit, device_class, icon in self.SENSORS:
+            config = {**common, "name": name, "unique_id": f"{self.node}_{key}", "icon": icon,
+                      "value_template": f"{{{{ ({expression}) if value_json.flight else None }}}}"}
+            if key == "flight":
+                config["json_attributes_topic"] = f"{self.topic}/state"
+                config["json_attributes_template"] = "{{ (value_json.flight or {}) | tojson }}"
+            if unit:
+                config.update(unit_of_measurement=unit, state_class="measurement")
+            if device_class:
+                config["device_class"] = device_class
+            configs.append((f"{MQTT_DISCOVERY_PREFIX}/sensor/{self.node}/{key}/config", config))
+        configs.append((f"{MQTT_DISCOVERY_PREFIX}/sensor/{self.node}/nearby/config", {
+            **common, "name": "Aircraft nearby", "unique_id": f"{self.node}_nearby", "icon": "mdi:radar",
+            "value_template": "{{ value_json.traffic | length }}", "state_class": "measurement"}))
+        configs.append((f"{MQTT_DISCOVERY_PREFIX}/sensor/{self.node}/seen_today/config", {
+            **common, "name": "Aircraft seen today", "unique_id": f"{self.node}_seen_today", "icon": "mdi:counter",
+            "value_template": "{{ value_json.stats.today if value_json.stats else None }}",
+            "state_class": "total"}))
+        return configs
+
+    def publish_state(self, state):
+        payload = json.dumps(state, sort_keys=True)
+        if payload != self.last_state:
+            self.last_state = payload
+            self.client.publish(f"{self.topic}/state", payload, retain=True)
+
+    def spotted(self, flight):
+        self.client.publish(f"{self.topic}/spotted", json.dumps(flight))
+
+    def close(self):
+        try:
+            self.client.publish(f"{self.topic}/availability", "offline", retain=True).wait_for_publish(3)
+        except Exception:
+            pass   # not connected: the broker sends our will instead
+        self.client.disconnect()
+        self.client.loop_stop()
+
+
+# =============================================================================
 # Main loop
 # =============================================================================
 
-def run():
-    pixoo = Pixoo(PIXOO_HOST)
-    log.info("Pixoo at %s | home %.4f,%.4f | radius %skm | checking every %ss",
-             PIXOO_HOST, HOME_LAT, HOME_LON, RADAR_RADIUS_KM, REFRESH_SECONDS)
+def _flight_status(n):
+    flight = {k: v for k, v in asdict(n).items() if k != "traffic"}
+    return {**flight, "direction": compass(n.bearing), "altitude_text": _fmt_altitude(n),
+            "heading_text": f"{arrow(n.heading)} {round(n.heading)}°" if n.heading is not None else None}
 
+
+def run():
+    global history
+    pixoo = Pixoo(PIXOO_HOST)
+    log.info("Pixoo at %s | home %.4f,%.4f | radius %skm | checking every %ss | data from %s",
+             PIXOO_HOST, HOME_LAT, HOME_LON, RADAR_RADIUS_KM, REFRESH_SECONDS, ", ".join(DATA_SOURCE))
+    if HISTORY in ("sqlite", "csv"):
+        history = History(HISTORY, HISTORY_DIR)
+        log.info("Recording history to %s (kept %s days)", history.path, HISTORY_RETENTION_DAYS or "forever")
+    mqtt = Mqtt() if MQTT_HOST else None
+    try:
+        _loop(pixoo, mqtt)
+    finally:
+        if history:
+            history.close()
+        if mqtt:
+            mqtt.close()
+
+
+def _loop(pixoo, mqtt):
     # The web server always runs (its root page shows the current screen); the Pixoo
     # only fetches from it when GIF_BASE_URL is set and reachable.
     use_url = bool(GIF_BASE_URL) and "CHANGE-ME" not in GIF_BASE_URL
@@ -946,7 +1601,16 @@ def run():
         except Exception as exc:
             log.warning("Could not set brightness: %s", exc)
 
-    on_screen, failures, retry_hosted_at = None, 0, None
+    on_screen, failures, retry_hosted_at, spotted = None, 0, None, None
+
+    def publish_status(**status):
+        if history:
+            status["stats"] = history.stats()
+        gif_host.set_status(**status)
+        if mqtt:   # the flight closest now: none while nothing is in range (the screen keeps the last one)
+            mqtt.publish_state({**status, "flight": status.get("flight") if status.get("traffic") else None,
+                                "updated": _iso(time.time())})
+
     while True:
         started = gif_host.heartbeat = time.monotonic()
 
@@ -963,7 +1627,7 @@ def run():
             failures = 0
         except LookupError as exc:  # nothing airborne nearby: keep the last flight on screen
             log.info("%s", exc)
-            gif_host.set_status(**{**gif_host.status, "traffic": [], "note": str(exc)})
+            publish_status(**{**gif_host.status, "traffic": [], "note": str(exc)})
             time.sleep(REFRESH_SECONDS)
             continue
         except Exception as exc:
@@ -972,9 +1636,16 @@ def run():
             time.sleep(min(300, REFRESH_SECONDS * failures))
             continue
 
-        flight = {k: v for k, v in asdict(n).items() if k != "traffic"}
-        gif_host.set_status(flight={**flight, "direction": compass(n.bearing), "altitude_text": _fmt_altitude(n)},
-                            traffic=n.traffic, mode="hosted GIF" if hosted else "pushed frames")
+        flight = _flight_status(n)
+        publish_status(flight=flight, traffic=n.traffic, mode="hosted GIF" if hosted else "pushed frames",
+                       source=n.source)
+        if history:
+            history.mark_shown(n)
+        if n.tags and spotted != (n.hex or n.flight):
+            spotted = n.hex or n.flight
+            log.info("Spotted %s aircraft: %s", " and ".join(n.tags), summary)
+            if mqtt:
+                mqtt.spotted(flight)
 
         # Re-uploading identical content only wears on the Pixoo
         signature = hashlib.sha1(b"".join(f.tobytes() for f in frames) + str(frame_ms).encode()).digest()
@@ -1035,6 +1706,19 @@ def main():
     if missing:
         sys.exit(f"Missing required setting(s): {', '.join(missing)}. Set them as environment variables, "
                  "e.g. PIXOO_HOST=192.168.1.50 HOME_LAT=51.4700 HOME_LON=-0.4543")
+    problems = [f"DATA_SOURCE: unknown source {name!r} (use fr24, adsb or opensky)"
+                for name in DATA_SOURCE if name not in SOURCES]
+    if not DATA_SOURCE:
+        problems.append("DATA_SOURCE is empty (use fr24, adsb or opensky)")
+    if HISTORY not in ("off", "sqlite", "csv"):
+        problems.append(f"HISTORY={HISTORY!r}: use off, sqlite or csv")
+    if MQTT_HOST and not args.preview:
+        try:
+            import paho.mqtt.client  # noqa: F401
+        except ImportError:
+            problems.append("MQTT_HOST is set but paho-mqtt isn't installed (pip install -r requirements.txt)")
+    if problems:
+        sys.exit("\n".join(problems))
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))  # PID 1 in Docker ignores SIGTERM otherwise
 
     try:

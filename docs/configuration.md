@@ -29,6 +29,7 @@ If any required variable is missing the app exits straight away and tells you wh
 | `FRAME_MS` | `300` | Milliseconds per animation frame. One plane pass is 27 frames, so the default loop is about 8 s. |
 | `SPLIT_FLAP` | `off` | `all` (or `true`) shows the flight values on a board of 7 character tiles. Each time the panel turns to its next page, the tiles that change flip through a few characters, left to right, like a departures board. The logo, route and labels don't change. The animation has twice as many frames (54), each `FRAME_MS / 2` long, so the plane moves at the same speed. `digits` uses the same tiles but only flips those showing a number; letters change straight away. |
 | `SHOW_DIRECTION` | `true` | Replaces the "DIST" label with the 8-point compass direction from your home to the plane (`N`, `NE`, `E`…), so the last page reads e.g. `SW  26KM`. |
+| `SHOW_HEADING` | `true` | Adds an arrow after the speed showing which way the plane is flying, north up (`480KT←` is heading west). This is the plane's own track, different from `SHOW_DIRECTION` (where it is from you). |
 | `PIXOO_BRIGHTNESS` | `-1` | `0`–`100` sets the brightness once at start-up. `-1` leaves the device's setting alone. |
 | `LOGO_SOURCES` | `fr24,avcodes` | Comma-separated list of logo sources, tried in order: `fr24` (FlightRadar24) and `avcodes` ([Jxck-S/airline-logos](https://github.com/Jxck-S/airline-logos) banners). Any other value, such as `none`, disables logos and shows the airline name in text. |
 
@@ -80,6 +81,102 @@ Military detection is best effort, from the live feed:
 
 FlightRadar24 hides many military flights, so expect to see transports and tankers
 rather than fighters.
+
+## Data sources
+
+| Variable | Default | Notes |
+|---|---|---|
+| `DATA_SOURCE` | `fr24` | Where positions come from: `fr24`, `adsb` or `opensky`. A comma-separated list is tried in order, so `adsb,fr24` uses adsb.lol and falls back to FlightRadar24 when it's down. |
+| `ADSB_URL` | `https://api.adsb.lol/v2/point/{lat}/{lon}/{radius_nm}` | For `adsb`: any readsb-style JSON. The default is the free [adsb.lol](https://adsb.lol) API. Point it at your own receiver to use your own antenna: `http://pi.local/tar1090/data/aircraft.json` (readsb, tar1090, dump1090-fa all work). `{lat}`, `{lon}`, `{radius_nm}` and `{radius_km}` are filled in if present. |
+| `LOOKUP_ADSBDB` | `true` | For `adsb` and `opensky`: look up the flight on screen at [adsbdb.com](https://www.adsbdb.com) for its flight number, airline, route, type and registration (cached for a day). |
+| `OPENSKY_CLIENT_ID` | *(empty)* | Optional [OpenSky](https://opensky-network.org) API client (from your OpenSky account page). Without one, OpenSky allows ~400 requests a day, so the app asks at most every 4 minutes; with one, every 30 seconds. |
+| `OPENSKY_CLIENT_SECRET` | *(empty)* | The client's secret. |
+
+What each source gives you:
+
+| | `fr24` | `adsb` (adsb.lol) | `adsb` (your receiver) | `opensky` |
+|---|---|---|---|---|
+| Positions | ✓ | ✓ | ✓ (your antenna's range) | ✓ (can be up to 4 min old without an account) |
+| Type, registration | ✓ | ✓ | ✓ with its aircraft database | via adsbdb |
+| Route, airline, flight number | ✓ | via adsbdb | via adsbdb | via adsbdb |
+| Military flag | heuristic | ✓ (database) + heuristic | ✓ with database + heuristic | heuristic |
+| Helicopter flag | by type | ✓ (category) + type | ✓ (category) + type | ✓ (category) + type |
+| Terms | unofficial, personal use | free, ODbL data | yours | free for non-commercial use |
+
+Routes from adsbdb come from a callsign database, so they're right for scheduled
+flights and can be missing or out of date for charters and new routes. The flight
+number shown is the callsign-based one (e.g. `VY26CC`), which can differ from the
+marketed number FlightRadar24 shows (`VY7504`).
+
+## History
+
+| Variable | Default | Notes |
+|---|---|---|
+| `HISTORY` | `off` | `sqlite` or `csv` records every aircraft that passes through your radius: one entry per visit with first and last seen times (UTC), flight, callsign, address, airline, type, registration, route, closest distance, lowest altitude, MIL/RARE tags, whether it was on screen, and the data source. |
+| `HISTORY_DIR` | `data` (`/data` in Docker, `/var/lib/pixoo-radar` with install.sh) | Folder for `history.sqlite` or `history.csv`. |
+| `HISTORY_RETENTION_DAYS` | `30` | Entries older than this are removed. `0` keeps everything. |
+| `HISTORY_TRIM_HOURS` | `1` | How often old entries are removed. |
+
+A visit is written once the aircraft has been out of range for 10 minutes, and any
+visits in progress are written when the app stops. The live page shows counts for
+today, and `GET /api/history?limit=100` returns the most recent visits as JSON
+(including ones still in progress).
+
+In Docker, mount a volume at `/data` to keep the history across container updates.
+`compose.yaml` already does this. A bind mount must be writable by the container's
+user (uid 10001): `sudo chown 10001 ./data`.
+
+The CSV opens straight in Excel, Numbers or Google Sheets. The SQLite file works
+with any SQLite tool, e.g. the busiest types this week:
+
+```sql
+SELECT aircraft, COUNT(*) FROM sightings
+WHERE first_seen >= date('now', '-7 days') GROUP BY aircraft ORDER BY 2 DESC LIMIT 10;
+```
+
+## MQTT and Home Assistant
+
+Off unless `MQTT_HOST` is set.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `MQTT_HOST` | *(empty)* | Broker address, e.g. `192.168.1.10` or `core-mosquitto`. |
+| `MQTT_PORT` | `1883` | `8883` is usual with TLS. |
+| `MQTT_USERNAME` / `MQTT_PASSWORD` | *(empty)* | Broker login, if it needs one. |
+| `MQTT_TLS` | `false` | `true` connects with TLS (system CA certificates). |
+| `MQTT_TOPIC` | `pixoo_radar` | Base topic. |
+| `MQTT_DISCOVERY` | `true` | Publish Home Assistant discovery so the sensors appear by themselves. |
+| `MQTT_DISCOVERY_PREFIX` | `homeassistant` | Home Assistant's discovery prefix. |
+
+Topics:
+
+| Topic | Retained | Content |
+|---|---|---|
+| `pixoo_radar/state` | yes | JSON: `flight` (the closest flight now, or `null` when nothing is in range), `traffic` (up to 15 aircraft), `stats` (with history on), `mode`, `source`, `updated` |
+| `pixoo_radar/availability` | yes | `online` / `offline` (also sent by the broker if the app disappears) |
+| `pixoo_radar/spotted` | no | JSON of a military or rare flight, once, when it comes on screen |
+
+Home Assistant gets one device, **Pixoo Radar**, with sensors for flight, airline,
+route, aircraft type, registration, altitude, speed, distance, direction, heading,
+highlight, aircraft nearby and (with history) aircraft seen today. The Flight sensor
+carries every field as attributes.
+
+Example automation: announce rare and military aircraft.
+
+```yaml
+automation:
+  - alias: Plane spotting
+    trigger:
+      - platform: mqtt
+        topic: pixoo_radar/spotted
+    action:
+      - service: notify.mobile_app_phone
+        data:
+          title: "{{ trigger.payload_json.tags | join(' & ') | upper }} overhead"
+          message: >-
+            {{ trigger.payload_json.flight }} {{ trigger.payload_json.aircraft }},
+            {{ trigger.payload_json.distance_km | round(0) }} km {{ trigger.payload_json.direction }}
+```
 
 ## Hosted GIFs (no "Loading.." screen)
 

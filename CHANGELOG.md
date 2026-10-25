@@ -6,6 +6,34 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- More data sources: `DATA_SOURCE=fr24|adsb|opensky`, or a list such as `adsb,fr24`
+  that falls back in order. `adsb` reads adsb.lol by default or your own receiver's
+  readsb/tar1090/dump1090 `aircraft.json` (`ADSB_URL`); `opensky` is rate-limited to
+  OpenSky's allowance, with optional API credentials. For both, the flight on screen is
+  looked up at adsbdb.com for route, airline, flight number, type and registration.
+- Heading: an arrow after the speed shows which way the plane is flying (`SHOW_HEADING`).
+- History of every aircraft that passes, in SQLite or CSV (`HISTORY`, `HISTORY_DIR`,
+  `HISTORY_RETENTION_DAYS`, `HISTORY_TRIM_HOURS`), with today's counts on the live page
+  and `/api/history`.
+- Optional MQTT with Home Assistant discovery: state, availability and a "spotted" event
+  for military and rare aircraft (`MQTT_*`).
+- Test suite (112 tests, including end-to-end runs against a fake Pixoo), run in CI on
+  every push and before each release build.
+
+### Fixed
+- Split-flap GIFs had uneven frame delays: Pillow merged repeated frames into longer
+  ones. The GIF is now written frame by frame, every frame with the same delay.
+- The search area was a square, so aircraft in its corners (up to 1.4× the radius away)
+  could be picked. Only the `RADAR_RADIUS_KM` circle counts now.
+- `HIGHLIGHT_MILITARY=false` now skips military aircraft even when they have an
+  airline-style flight number.
+- A setting with an invalid number (e.g. `RADAR_RADIUS_KM=100.5`) exits with a clear
+  message instead of a traceback; unknown `DATA_SOURCE` or `HISTORY` values are reported
+  at start-up.
+- `install.sh` now creates `/etc/pixoo-radar.env` readable by root only, since it can hold
+  passwords.
+
 ## [0.2.0] - 2026-10-25
 
 ### Added

@@ -1,36 +1,52 @@
 # How it works
 
 Everything is in one file, [`src/pixoo_radar.py`](../src/pixoo_radar.py), using only
-Pillow, requests and FlightRadarAPI.
+Pillow, requests, FlightRadarAPI and (for MQTT) paho-mqtt. Tests are in [`tests/`](../tests).
 
 ```text
           every REFRESH_SECONDS
  ┌──────────────┐   flights in radius   ┌──────────────────┐
- │ FlightRadar24│ ────────────────────▶ │                  │   Device/PlayTFGif (URL)  ┌─────────┐
- └──────────────┘                       │   pixoo_radar    │ ────────────────────────▶ │ Pixoo64 │
+ │ FR24 / adsb /│ ────────────────────▶ │                  │   Device/PlayTFGif (URL)  ┌─────────┐
+ │ OpenSky      │   route, type: adsbdb │   pixoo_radar    │ ────────────────────────▶ │ Pixoo64 │
+ └──────────────┘                       │                  │                           │         │
  ┌──────────────┐   airline logo        │                  │                           │         │
  │ logo sources │ ────────────────────▶ │  render 27 frames│ ◀──── GET /<token>/N.gif ─│         │
  └──────────────┘   (cached in memory)  │  encode GIF      │                           └─────────┘
-                                        │  web server :8765│ ◀──── browser: /  /api  
+                                        │  web server :8765│ ◀──── browser: /  /api
+                                        │  history, MQTT   │ ────▶ history.sqlite / .csv, MQTT broker
                                         └──────────────────┘
 ```
 
 ## 1. Find the closest flight
 
-1. Ask FlightRadar24 for all flights in a box `RADAR_RADIUS_KM` around home.
-2. Drop aircraft without a position, on the ground (unless `SHOW_GROUND_TRAFFIC`), and
+1. Ask the first working `DATA_SOURCE` for all aircraft in a box around home, and turn
+   each answer into the same record (position, altitude in ft, speed in kt, track,
+   callsign, type, registration, any military/helicopter flags the source has).
+2. Drop aircraft outside the `RADAR_RADIUS_KM` circle, without a position, on the ground (unless `SHOW_GROUND_TRAFFIC`), and
    helicopters (unless `IGNORE_HELICOPTERS=false`).
 3. Tag military and rare aircraft (see [configuration](configuration.md#military-and-rare-aircraft)).
-   Untagged aircraft also need an airline flight number (and, with
-   `SKIP_UNKNOWN_DESTINATION`, a known destination).
+   Untagged aircraft must look like an airline flight: a flight number (FR24) or an
+   airline-style callsign such as `BAW135` (other sources), and not be military.
+   Everything left is recorded in the history.
 4. Pick the one with the smallest great-circle (haversine) distance from home. With
    `PRIORITIZE_HIGHLIGHTS`, the closest *tagged* aircraft wins over any untagged one.
    The bearing from home gives the compass direction.
-5. Fetch its details (airline name, route, aircraft model, registration). If that call
-   fails, fall back to what the live feed already had.
+5. Fetch its details: from FlightRadar24 for `fr24`, from adsbdb.com otherwise (airline,
+   route, flight number, type, registration). If that fails, use what the feed had.
+   With `SKIP_UNKNOWN_DESTINATION`, up to five candidates are looked up until one has a
+   known destination.
 
 If nothing is airborne nearby, the last flight stays on screen until something shows up.
-If FlightRadar24 errors, the app backs off (up to 5 minutes) and retries.
+If every source errors, the app backs off (up to 5 minutes) and retries.
+
+## History and MQTT
+
+With `HISTORY` on, every aircraft that passed the filters is tracked while it's in
+range (closest distance, lowest altitude, tags, whether it went on screen) and
+written as one entry once it's been gone for 10 minutes. Old entries are trimmed every
+`HISTORY_TRIM_HOURS`. With `MQTT_HOST` set, each update publishes the state to
+`<topic>/state` (only when it changed), and a military or rare flight coming on screen
+publishes `<topic>/spotted` once.
 
 ## 2. Draw the screen
 
@@ -101,6 +117,13 @@ The app double-checks each step:
 Pixoo shows "Loading.." while it receives them. The animation id counter is reset every
 32 uploads (`Draw/ResetHttpGifId`), because the Pixoo freezes if it grows too large.
 
+### The GIF file
+
+The GIF is written frame by frame rather than with Pillow's `save_all`. Pillow merges
+consecutive identical frames into one with a longer delay, and split-flap animations
+have many of those (the picture holds still between flips). A repeated frame here is a
+1×1 frame that changes nothing, so every frame keeps the same delay.
+
 ### Not re-sending the same thing
 
 A hash of the frames is compared with what's on screen. If the closest flight and every
@@ -114,7 +137,8 @@ Always running on `GIF_PORT` (default 8765), plain HTTP, no dependencies:
 | Path | What |
 |---|---|
 | `/` | Live page: the current screen, the flight's details and nearby traffic, polling `/api/current` every 5 s |
-| `/api/current` | JSON: the flight on screen, up to 15 nearby aircraft (distance, direction, tags), mode, age |
+| `/api/current` | JSON: the flight on screen, up to 15 nearby aircraft (distance, direction, heading, tags), today's counts, mode, data source, age |
+| `/api/history?limit=N` | JSON: the N most recent visits (default 100, with `HISTORY` on) |
 | `/latest.gif` | The current animation |
 | `/<token>/<n>.gif` | Hosted GIFs for the Pixoo |
 | `/<token>/check` | Start-up self-check |

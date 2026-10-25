@@ -163,7 +163,39 @@ The app can't reach the Pixoo's API.
 - `Flight data unavailable (...)`: FlightRadar24 didn't answer or refused. The app backs
   off and retries. If it persists for hours, the unofficial endpoints may have changed:
   check for a newer release or a newer FlightRadarAPI version. Don't lower
-  `REFRESH_SECONDS` to "fix" it; that makes rate limiting more likely.
+  `REFRESH_SECONDS` to "fix" it; that makes rate limiting more likely. A second source
+  as a fallback keeps the screen going: `DATA_SOURCE=fr24,adsb`.
+- `OpenSky's daily request limit is used up`: anonymous OpenSky access allows about 400
+  requests a day. The app already limits itself to one every 4 minutes, but other
+  programs on the same IP address count too. Create a free OpenSky account and set
+  `OPENSKY_CLIENT_ID` / `OPENSKY_CLIENT_SECRET`, or use `DATA_SOURCE=opensky,adsb`.
+- `... didn't return a readsb aircraft list`: `ADSB_URL` doesn't point at readsb-style
+  JSON. For tar1090 it's usually `http://<pi>/tar1090/data/aircraft.json`, for
+  dump1090-fa `http://<pi>:8080/data/aircraft.json`.
+
+## Wrong or missing route with adsb or OpenSky
+
+Those sources don't know routes, so the app looks the callsign up at adsbdb.com.
+That database maps callsigns to scheduled routes: charters, diversions and brand-new
+routes can be missing (`--- → ---`) or out of date. FlightRadar24 (`DATA_SOURCE=fr24`)
+knows the actual route.
+
+## MQTT: nothing in Home Assistant
+
+- Check the log for `MQTT connected to ...`. A `refused the connection` message gives
+  the broker's reason, usually wrong `MQTT_USERNAME` / `MQTT_PASSWORD`.
+- Home Assistant needs the MQTT integration set up, with discovery on (the default),
+  using the same prefix as `MQTT_DISCOVERY_PREFIX`.
+- `mosquitto_sub -h <broker> -t 'pixoo_radar/#' -v` shows what the app publishes.
+- Sensors show *unknown* while nothing is in range; that's expected.
+
+## History: "Permission denied" or no file
+
+In Docker the history lives in `/data`, which must be a volume or a folder the container
+user (uid 10001) can write: `sudo chown 10001 ./data` for a bind mount. With `install.sh`
+it's in `/var/lib/pixoo-radar`. Entries appear once an aircraft has left the area for
+10 minutes, or when the app stops; the live page's "seen today" counts include visits in
+progress.
 
 ## No airline logo, just the name
 

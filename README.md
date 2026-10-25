@@ -16,22 +16,29 @@ registration, speed and distance.
 
 ## Features
 
-- **Closest flight, live**: polls FlightRadar24 every `REFRESH_SECONDS` within
-  `RADAR_RADIUS_KM` of your location and shows the nearest airborne aircraft.
+- **Closest flight, live**: polls every `REFRESH_SECONDS` within `RADAR_RADIUS_KM` of
+  your location and shows the nearest airborne aircraft.
+- **Your choice of data**: FlightRadar24, [adsb.lol](https://adsb.lol), your own ADS-B
+  receiver (readsb/tar1090/dump1090), or [OpenSky](https://opensky-network.org), with
+  fallbacks. Routes and types for the free sources come from [adsbdb.com](https://www.adsbdb.com).
 - **No "Loading.." screen**: with `GIF_BASE_URL` set, the app serves each animation as a
   GIF and the Pixoo fetches and plays it itself, so the picture just swaps in.
   Without it, frames are pushed over the Pixoo's API (works anywhere, shows "Loading..").
 - **Airline logos** fitted to the 64×20 strip: backgrounds keyed out, thin strokes
   firmed up, dark logos lifted so they're visible on black.
-- **Climb/descent arrows**, flight levels above 10,000 ft, km distance and the compass
-  direction to look in (`SW  26KM`).
+- **Climb/descent arrows**, flight levels above 10,000 ft, km distance, the compass
+  direction to look in (`SW  26KM`) and an arrow for the way the plane is heading (`480KT←`).
 - **Military and rare aircraft** get a flashing border and a MIL/RARE badge, and are shown
   ahead of closer ordinary flights. You can edit the list of rare aircraft types.
 - **Split-flap option**: the flight values on departures-board tiles that flip, for every
   character or digits only.
 - **Helicopters ignored** by default, optionally anything without a known destination.
 - **Live web page**: open `http://<host>:8765` for the current screen, the flight's
-  details and a table of nearby traffic, updating every few seconds.
+  details, a table of nearby traffic and today's counts, updating every few seconds.
+- **History** (optional): every aircraft that passes, in SQLite or CSV, trimmed after
+  `HISTORY_RETENTION_DAYS`.
+- **MQTT and Home Assistant** (optional): sensors appear by themselves, plus a
+  "spotted" event for military and rare aircraft.
 - **Self-diagnosing**: checks that the Pixoo can reach it, falls back to pushing frames
   if not, and says why in the logs.
 - **`/health` endpoint** and a Docker `HEALTHCHECK`.
@@ -78,6 +85,10 @@ Everything is an environment variable. Only the first three are required.
 | `RADAR_RADIUS_KM` | `100` | Search radius around home, whole kilometres. |
 | `REFRESH_SECONDS` | `60` | How often to look for the closest flight. |
 | `SHOW_GROUND_TRAFFIC` | `false` | `true` to include parked and taxiing aircraft. |
+| `DATA_SOURCE` | `fr24` | `fr24`, `adsb` or `opensky`; a list like `adsb,fr24` falls back in order. |
+| `ADSB_URL` | adsb.lol API | readsb-style JSON for `adsb`, e.g. your receiver's `http://pi.local/tar1090/data/aircraft.json`. |
+| `LOOKUP_ADSBDB` | `true` | Route, airline, type and registration from adsbdb.com for `adsb`/`opensky`. |
+| `OPENSKY_CLIENT_ID` / `OPENSKY_CLIENT_SECRET` | *(empty)* | Optional OpenSky API client, for 30 s updates instead of 4 min. |
 | `IGNORE_HELICOPTERS` | `true` | Skip helicopters (their routes are almost never known). |
 | `SKIP_UNKNOWN_DESTINATION` | `false` | `true` skips flights with no known destination. |
 | `HIGHLIGHT_MILITARY` | `true` | Show military aircraft (they usually have no flight number) with a red border and MIL badge. |
@@ -88,6 +99,7 @@ Everything is an environment variable. Only the first three are required.
 | `MILITARY_CALLSIGNS` | `rch,cnv,pat,…` | Callsign prefixes / operator codes treated as military (on top of US/UK military addresses and military types). |
 | `FRAME_MS` | `300` | Animation frame time in milliseconds. |
 | `SHOW_DIRECTION` | `true` | Show the compass direction to the plane (`NE`) in place of the "DIST" label. |
+| `SHOW_HEADING` | `true` | Arrow after the speed for the way the plane is flying. |
 | `SPLIT_FLAP` | `off` | `all` puts the flight values on departures-board tiles that flip to each new value; `digits` flips only tiles showing a number. |
 | `PIXOO_BRIGHTNESS` | `-1` | Set brightness `0`–`100` at start-up; `-1` leaves it alone. |
 | `LOGO_SOURCES` | `fr24,avcodes` | Where to fetch airline logos, tried in order. `none` shows the airline name instead. |
@@ -95,6 +107,16 @@ Everything is an environment variable. Only the first three are required.
 | `COLOR_BOX` | `#2B2B2B` | Colour of the panels behind the text. |
 | `COLOR_MILITARY` | `#FF3030` | Border and badge colour for military aircraft. |
 | `COLOR_RARE` | `#00C8FF` | Border and badge colour for rare aircraft. |
+| `HISTORY` | `off` | `sqlite` or `csv`: log every aircraft that passes. |
+| `HISTORY_DIR` | `/data` (Docker) | Where the history file goes. |
+| `HISTORY_RETENTION_DAYS` | `30` | Remove entries older than this (`0` keeps all). |
+| `HISTORY_TRIM_HOURS` | `1` | How often old entries are removed. |
+| `MQTT_HOST` | *(empty)* | MQTT broker; setting it turns MQTT on. |
+| `MQTT_PORT` | `1883` | Broker port. |
+| `MQTT_USERNAME` / `MQTT_PASSWORD` | *(empty)* | Broker login. |
+| `MQTT_TLS` | `false` | Connect with TLS. |
+| `MQTT_TOPIC` | `pixoo_radar` | Base topic. |
+| `MQTT_DISCOVERY` / `MQTT_DISCOVERY_PREFIX` | `true` / `homeassistant` | Home Assistant discovery. |
 | `TZ` | `UTC` | Timezone for log timestamps (Docker). |
 
 More detail, examples and edge cases: [docs/configuration.md](docs/configuration.md).
@@ -148,6 +170,19 @@ reverse proxy. The proxy can still serve the browser view over HTTPS; the Pixoo 
 goes around it. The app tests its own `GIF_BASE_URL` at start-up and warns you if it
 redirects. See [troubleshooting](docs/troubleshooting.md#the-pixoo-cant-follow-http--https-redirects).
 
+## Development
+
+```sh
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
+The tests need no network or Pixoo: they cover every data source's parsing, the
+filters and highlights, rendering (all split-flap modes), the GIF encoder, history,
+the web server and MQTT (against a real in-process broker), plus end-to-end runs of
+the app against a fake Pixoo. They run on every push and before each release build.
+
 ## Documentation
 
 - [Configuration](docs/configuration.md)
@@ -158,11 +193,15 @@ redirects. See [troubleshooting](docs/troubleshooting.md#the-pixoo-cant-follow-h
 
 ## Disclaimer
 
-- Flight data comes from **FlightRadar24's unofficial, undocumented web endpoints**
+- By default, flight data comes from **FlightRadar24's unofficial, undocumented web endpoints**
   via the [FlightRadarAPI](https://github.com/JeanExtreme002/FlightRadarAPI) package.
   This project isn't affiliated with or endorsed by FlightRadar24. Keep it to
   **personal, non-commercial use**, respect their terms, and don't lower
   `REFRESH_SECONDS` aggressively. The endpoints can change or stop working at any time.
+- The other sources have their own terms: [adsb.lol](https://adsb.lol) (free, data under
+  ODbL), [OpenSky Network](https://opensky-network.org) (non-commercial use) and
+  [adsbdb.com](https://www.adsbdb.com) (free API). Be gentle with them; the app caches
+  lookups and rate-limits OpenSky.
 - **Airline logos are fetched at runtime** (from FlightRadar24 and
   [Jxck-S/airline-logos](https://github.com/Jxck-S/airline-logos)), cached in memory
   only, and **never stored in or distributed with this repository**. They're
@@ -174,6 +213,8 @@ redirects. See [troubleshooting](docs/troubleshooting.md#the-pixoo-cant-follow-h
 - Inspired by [chrivoge/PixooRadar](https://github.com/chrivoge/PixooRadar).
 - [FlightRadarAPI](https://github.com/JeanExtreme002/FlightRadarAPI) by JeanExtreme002.
 - Airline banners from [Jxck-S/airline-logos](https://github.com/Jxck-S/airline-logos).
+- Open flight data from [adsb.lol](https://adsb.lol), [OpenSky Network](https://opensky-network.org)
+  and [adsbdb.com](https://www.adsbdb.com); MQTT via [Eclipse Paho](https://eclipse.dev/paho/).
 
 ## License
 

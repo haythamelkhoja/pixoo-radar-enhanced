@@ -35,6 +35,10 @@ services:
       GIF_BASE_URL: "http://192.168.1.20:8765"   # a swarm node's address, plus GIF_PORT
       GIF_PORT: "8765"
       TZ: Europe/London
+      # HISTORY: sqlite                 # log every aircraft seen; see the volume below
+      # MQTT_HOST: 192.168.1.10         # publish to Home Assistant / any MQTT broker
+    # volumes:                          # history lives on whichever node runs the task;
+    #   - pixoo-radar-data:/data        # pin it with a placement constraint to keep one file
     ports:
       - target: 8765                    # plain-http GIF server the Pixoo fetches from
         published: 8765

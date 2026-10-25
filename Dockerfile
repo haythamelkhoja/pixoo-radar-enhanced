@@ -5,7 +5,8 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_ROOT_USER_ACTION=ignore \
-    GIF_PORT=8765
+    GIF_PORT=8765 \
+    HISTORY_DIR=/data
 
 # tzdata so TZ=Europe/London etc. applies to log timestamps (slim images don't ship it)
 RUN apt-get update \
@@ -17,7 +18,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-RUN useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin radar
+RUN useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin radar \
+    && mkdir /data && chown radar /data
 COPY src/pixoo_radar.py .
 
 USER radar

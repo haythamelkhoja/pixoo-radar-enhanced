@@ -107,8 +107,28 @@ GIF_BASE_URL=${gif_base_url}
 #COLOR_TEXT="#FFFF00"
 #COLOR_BOX="#2B2B2B"
 #GIF_PORT=8765
+#SHOW_HEADING=true
+# Data: fr24, adsb (adsb.lol or your receiver's .../data/aircraft.json), opensky; several = fallbacks
+#DATA_SOURCE=fr24
+#ADSB_URL=https://api.adsb.lol/v2/point/{lat}/{lon}/{radius_nm}
+#LOOKUP_ADSBDB=true
+#OPENSKY_CLIENT_ID=
+#OPENSKY_CLIENT_SECRET=
+# History of every aircraft seen: off, sqlite or csv
+#HISTORY=off
+#HISTORY_RETENTION_DAYS=30
+#HISTORY_TRIM_HOURS=1
+# MQTT / Home Assistant (off unless MQTT_HOST is set)
+#MQTT_HOST=
+#MQTT_PORT=1883
+#MQTT_USERNAME=
+#MQTT_PASSWORD=
+#MQTT_TLS=false
+#MQTT_TOPIC=pixoo_radar
+#MQTT_DISCOVERY=true
+#MQTT_DISCOVERY_PREFIX=homeassistant
 EOF
-    chmod 644 "$ENV_FILE"
+    chmod 600 "$ENV_FILE"   # may hold MQTT/OpenSky passwords; systemd reads it as root
     say "Wrote $ENV_FILE"
 fi
 
@@ -123,6 +143,8 @@ After=network-online.target
 User=$USER_NAME
 EnvironmentFile=$ENV_FILE
 Environment=PYTHONUNBUFFERED=1
+Environment=HISTORY_DIR=/var/lib/pixoo-radar
+StateDirectory=pixoo-radar
 ExecStart=$APP_DIR/venv/bin/python $APP_DIR/pixoo_radar.py
 Restart=always
 RestartSec=30

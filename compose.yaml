@@ -13,4 +13,9 @@ services:
     env_file: .env
     ports:
       - "8765:8765"   # plain-http GIF server the Pixoo fetches from (keep in sync with GIF_PORT)
+    volumes:
+      - pixoo-radar-data:/data   # history, with HISTORY=sqlite or csv in .env
     restart: unless-stopped
+
+volumes:
+  pixoo-radar-data:
